@@ -1,0 +1,2 @@
+"""Logica pura del backend."""
+
