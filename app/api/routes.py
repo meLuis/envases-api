@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
 from app.domain.schemas import BudgetRequest, PurchaseOptimizeRequest, QueryResponse
@@ -13,8 +13,13 @@ router = APIRouter()
 
 
 @router.get("/health")
-def health() -> dict:
-    return {"ok": True, "service": "envases_backend"}
+def health(request: Request) -> dict:
+    return {
+        "ok": True,
+        "service": "envases_backend",
+        "model": request.app.title,
+        "version": request.app.version,
+    }
 
 
 @router.get("/datasets")
@@ -154,4 +159,3 @@ def _query(call):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error ejecutando consulta: {exc}") from exc
-
