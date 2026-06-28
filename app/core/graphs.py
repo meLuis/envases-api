@@ -210,6 +210,7 @@ def _transaction_graph(frame: pd.DataFrame, entity_type: str, graph_name: str) -
     for row in frame.itertuples(index=False):
         entity_node = f"{entity_type}:{row.entity_norm}"
         product_node = f"PRODUCT:{row.product_id}"
+        document = str(getattr(row, "document", "") or "").strip()
         nodes[entity_node] = {"node_id": entity_node, "node_type": entity_type, "label": row.entity_name, "ref": row.entity_norm}
         nodes[product_node] = {"node_id": product_node, "node_type": "PRODUCT", "label": row.product_name, "ref": row.product_id}
         edges.append(
@@ -221,6 +222,27 @@ def _transaction_graph(frame: pd.DataFrame, entity_type: str, graph_name: str) -
                 "amount": float(row.total or 0),
             }
         )
+        if document:
+            document_node = f"{graph_name}_DOC:{document}"
+            nodes[document_node] = {
+                "node_id": document_node,
+                "node_type": "DOCUMENT",
+                "label": document,
+                "ref": document,
+            }
+            for source, target, relation in (
+                (entity_node, document_node, f"{graph_name.lower()}_document"),
+                (document_node, product_node, f"{graph_name.lower()}_line"),
+            ):
+                edges.append(
+                    {
+                        "source": source,
+                        "target": target,
+                        "edge_type": relation,
+                        "weight": float(row.quantity or 0),
+                        "amount": float(row.total or 0),
+                    }
+                )
     node_df = pd.DataFrame(nodes.values())
     edge_df = pd.DataFrame(edges)
     return node_df, edge_df, _metrics(node_df, edge_df, f"G_{graph_name.lower()}")
@@ -281,4 +303,3 @@ def _reconstruct(meet: str, parents_front: dict, parents_back: dict) -> list[str
         right.append(node)
         node = parents_back[node]
     return left + right
-

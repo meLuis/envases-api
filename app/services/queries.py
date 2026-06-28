@@ -383,3 +383,491 @@ def _label(nodes: pd.DataFrame, node_id: str) -> str:
 
 def _records(frame: pd.DataFrame) -> list[dict]:
     return frame.fillna("").to_dict("records")
+
+
+# ============================================================================
+# ANALISIS DOCUMENTALES: 5 algoritmos sobre nodos DOCUMENT en grafos transaccionales
+# ============================================================================
+
+
+def product_co_occurrence(dataset_id: str, product_id: str, graph_type: str = "sales", limit: int = 15) -> QueryResponse:
+    """
+    RECOMENDACIÓN: Market Basket Analysis.
+
+    Para un producto, encuentra qué otros productos aparecen en el MISMO DOCUMENTO.
+    Diferencia con cross_sell:
+    - cross_sell mide afinidad histórica (clientes que compraron A también compraron B en cualquier momento)
+    - co_occurrence mide co-compra operativa (B estaba en la misma factura/comprobante que A)
+
+    Usa: aristas DOCUMENT -> PRODUCT (edge_type: sale_line o purchase_line)
+    """
+    if graph_type not in ("sales", "purchases"):
+        graph_type = "sales"
+
+    try:
+        edges = read_csv(dataset_id, f"transaction_graph_{graph_type}_edges.csv")
+    except FileNotFoundError:
+        return QueryResponse(ok=False, error=f"Grafo G_{graph_type} no disponible.", algorithm="Market Basket Analysis")
+
+    edges["amount"] = pd.to_numeric(edges["amount"], errors="coerce").fillna(0)
+    edges["weight"] = pd.to_numeric(edges["weight"], errors="coerce").fillna(0)
+
+    pid = str(product_id)
+    origin_node = f"PRODUCT:{pid}"
+
+    # Encontrar todos los documentos que contienen este producto
+    doc_edges = edges[edges[f"edge_type"].str.contains("line", na=False)]
+    documents_with_origin = doc_edges[doc_edges["target"] == origin_node]["source"].unique()
+
+    if len(documents_with_origin) == 0:
+        return QueryResponse(
+            ok=False,
+            error=f"Producto {product_id} no aparece en documentos de {graph_type}.",
+            algorithm="Market Basket Analysis - BFS en DOCUMENT nodes"
+        )
+
+    # Por cada documento, listar otros productos
+    co_products: dict[str, dict] = {}
+    for doc_node in documents_with_origin:
+        # Encontrar todos los productos en este documento
+        products_in_doc = doc_edges[doc_edges["source"] == doc_node]
+        for row in products_in_doc.itertuples(index=False):
+            if row.target != origin_node:
+                prod_id = row.target.replace("PRODUCT:", "", 1)
+                if prod_id not in co_products:
+                    co_products[prod_id] = {"frequency": 0, "total_quantity": 0.0, "total_amount": 0.0, "documents": []}
+                co_products[prod_id]["frequency"] += 1
+                co_products[prod_id]["total_quantity"] += float(row.weight or 0)
+                co_products[prod_id]["total_amount"] += float(row.amount or 0)
+                co_products[prod_id]["documents"].append(doc_node)
+
+    if not co_products:
+        return QueryResponse(
+            ok=False,
+            error="El producto no aparece con otros en documentos.",
+            algorithm="Market Basket Analysis - BFS en DOCUMENT nodes"
+        )
+
+    # Obtener nombres de productos
+    nodes = read_csv(dataset_id, f"transaction_graph_{graph_type}_nodes.csv")
+    node_labels = {str(row.node_id): str(row.label) for row in nodes.itertuples(index=False)}
+    origin_name = node_labels.get(origin_node, pid)
+
+    # Ranking por frecuencia y volumen
+    ranked = sorted(
+        co_products.items(),
+        key=lambda x: (x[1]["frequency"], x[1]["total_amount"]),
+        reverse=True
+    )[:limit]
+
+    table = [
+        {
+            "product_id": prod_id,
+            "product_name": node_labels.get(f"PRODUCT:{prod_id}", ""),
+            "co_occurrences": co_products[prod_id]["frequency"],
+            "total_quantity": round(co_products[prod_id]["total_quantity"], 2),
+            "total_amount": round(co_products[prod_id]["total_amount"], 2),
+            "avg_amount_per_doc": round(co_products[prod_id]["total_amount"] / co_products[prod_id]["frequency"], 2),
+        }
+        for prod_id, data in ranked
+    ]
+
+    return QueryResponse(
+        answer=f"'{origin_name}' aparece en {len(documents_with_origin)} documentos. Se encontraron {len(co_products)} productos co-comprados en la misma operación.",
+        algorithm="Market Basket Analysis - BFS bidireccional en DOCUMENT nodes",
+        table=table,
+        metrics={
+            "origin_product": pid,
+            "documents_containing_origin": int(len(documents_with_origin)),
+            "unique_co_products": len(co_products),
+            "top_shown": limit,
+        },
+        evidence={
+            "dataset_id": dataset_id,
+            "artifacts": [f"transaction_graph_{graph_type}_edges.csv", f"transaction_graph_{graph_type}_nodes.csv"],
+            "graph": f"G_{graph_type}",
+            "model": "DOCUMENT node as transaction context"
+        },
+    )
+
+
+def product_volatility(dataset_id: str, product_id: str, graph_type: str = "sales") -> QueryResponse:
+    """
+    PUNTO 2: Volatilidad de co-compra.
+
+    ¿Un producto siempre aparece con los mismos otros productos, o varía según el documento?
+    - Alta volatilidad: aparece con diferentes combinaciones → "versátil"
+    - Baja volatilidad: aparece con conjunto fijo → "dependiente"
+
+    Métrica: Jaccard similarity promedio entre documentos.
+    """
+    if graph_type not in ("sales", "purchases"):
+        graph_type = "sales"
+
+    try:
+        edges = read_csv(dataset_id, f"transaction_graph_{graph_type}_edges.csv")
+    except FileNotFoundError:
+        return QueryResponse(ok=False, error=f"Grafo G_{graph_type} no disponible.", algorithm="Volatility Analysis")
+
+    pid = str(product_id)
+    origin_node = f"PRODUCT:{pid}"
+    doc_edges = edges[edges["edge_type"].str.contains("line", na=False)]
+    documents_with_origin = doc_edges[doc_edges["target"] == origin_node]["source"].unique()
+
+    if len(documents_with_origin) < 2:
+        return QueryResponse(
+            ok=False,
+            error="Se necesitan al menos 2 documentos para calcular volatilidad.",
+            algorithm="Volatility Analysis"
+        )
+
+    # Construir lista de productos por documento
+    doc_products: dict[str, set[str]] = {}
+    for doc_node in documents_with_origin:
+        products_in_doc = doc_edges[doc_edges["source"] == doc_node]["target"].values
+        doc_products[doc_node] = {p.replace("PRODUCT:", "", 1) for p in products_in_doc if p != origin_node}
+
+    # Calcular Jaccard similarity entre pares de documentos
+    from itertools import combinations
+    similarities = []
+    for doc1, doc2 in combinations(doc_products.keys(), 2):
+        union = len(doc_products[doc1] | doc_products[doc2])
+        intersection = len(doc_products[doc1] & doc_products[doc2])
+        jaccard = intersection / union if union > 0 else 0
+        similarities.append(jaccard)
+
+    avg_jaccard = sum(similarities) / len(similarities) if similarities else 0
+    volatility = round(1 - avg_jaccard, 4)  # Inverso: alta similitud → baja volatilidad
+
+    # Clasificar
+    if volatility > 0.7:
+        volatility_class = "MUY VOLÁTIL (versátil, combina con muchos productos diferentes)"
+    elif volatility > 0.4:
+        volatility_class = "MODERADAMENTE VOLÁTIL (algunos patrones recurrentes)"
+    else:
+        volatility_class = "ESTABLE (aparece con conjunto consistente de productos)"
+
+    # Documentos más comunes
+    nodes = read_csv(dataset_id, f"transaction_graph_{graph_type}_nodes.csv")
+    node_labels = {str(row.node_id): str(row.label) for row in nodes.itertuples(index=False)}
+    origin_name = node_labels.get(origin_node, pid)
+
+    sample_docs = sorted(doc_products.items(), key=lambda x: len(x[1]), reverse=True)[:5]
+    doc_samples = [
+        {
+            "document": doc,
+            "co_products_count": len(prods),
+            "co_products": ", ".join(sorted(prods)[:5])
+        }
+        for doc, prods in sample_docs
+    ]
+
+    return QueryResponse(
+        answer=f"'{origin_name}' presenta volatilidad {volatility:.2%} ({volatility_class}). Aparece en {len(documents_with_origin)} documentos con Jaccard promedio {avg_jaccard:.2%}.",
+        algorithm="Volatility Analysis - Jaccard similarity entre DOCUMENT product sets",
+        table=doc_samples,
+        metrics={
+            "product_id": pid,
+            "documents_count": int(len(documents_with_origin)),
+            "avg_jaccard_similarity": round(avg_jaccard, 4),
+            "volatility_score": volatility,
+            "volatility_class": volatility_class,
+        },
+        evidence={
+            "dataset_id": dataset_id,
+            "artifacts": [f"transaction_graph_{graph_type}_edges.csv"],
+            "graph": f"G_{graph_type}",
+            "method": "Jaccard(doc1_products, doc2_products) over all pairs"
+        },
+    )
+
+
+def document_logistics_efficiency(dataset_id: str, graph_type: str = "sales") -> QueryResponse:
+    """
+    PUNTO 3: Eficiencia logística por documento.
+
+    Analiza patrones de documentos:
+    - ¿Cuántos productos típicamente van en un documento?
+    - ¿Cuál es la distribución (simples vs. complejos)?
+    - ¿Cuánto volumen/monto promedio?
+    """
+    if graph_type not in ("sales", "purchases"):
+        graph_type = "sales"
+
+    try:
+        edges = read_csv(dataset_id, f"transaction_graph_{graph_type}_edges.csv")
+    except FileNotFoundError:
+        return QueryResponse(ok=False, error=f"Grafo G_{graph_type} no disponible.", algorithm="Logistics Efficiency")
+
+    edges["amount"] = pd.to_numeric(edges["amount"], errors="coerce").fillna(0)
+    edges["weight"] = pd.to_numeric(edges["weight"], errors="coerce").fillna(0)
+
+    # Filtrar solo aristas document -> product
+    doc_edges = edges[edges["edge_type"].str.contains("line", na=False)].copy()
+
+    if doc_edges.empty:
+        return QueryResponse(ok=False, error="No hay documentos en este grafo.", algorithm="Logistics Efficiency")
+
+    # Agrupar por documento
+    doc_stats = doc_edges.groupby("source").agg(
+        product_count=("target", "count"),
+        total_quantity=("weight", "sum"),
+        total_amount=("amount", "sum"),
+    ).reset_index()
+    doc_stats.columns = ["document", "product_count", "total_quantity", "total_amount"]
+
+    # Distribución
+    dist = doc_stats["product_count"].value_counts().sort_index()
+
+    return QueryResponse(
+        answer=f"Análisis de {len(doc_stats)} documentos en G_{graph_type}. Promedio {doc_stats['product_count'].mean():.1f} productos/documento.",
+        algorithm="Logistics Efficiency - Document aggregation & distribution analysis",
+        table=[
+            {
+                "metric": "Documentos analizados",
+                "value": int(len(doc_stats))
+            },
+            {
+                "metric": "Productos promedio por documento",
+                "value": round(doc_stats["product_count"].mean(), 2)
+            },
+            {
+                "metric": "Documentos simples (1-2 productos)",
+                "value": int(doc_stats[doc_stats["product_count"] <= 2].shape[0])
+            },
+            {
+                "metric": "Documentos complejos (10+ productos)",
+                "value": int(doc_stats[doc_stats["product_count"] >= 10].shape[0])
+            },
+            {
+                "metric": "Monto promedio por documento",
+                "value": round(doc_stats["total_amount"].mean(), 2)
+            },
+            {
+                "metric": "Monto máximo en un documento",
+                "value": round(doc_stats["total_amount"].max(), 2)
+            },
+        ],
+        metrics={
+            "total_documents": int(len(doc_stats)),
+            "avg_products_per_doc": round(doc_stats["product_count"].mean(), 2),
+            "avg_amount_per_doc": round(doc_stats["total_amount"].mean(), 2),
+            "distribution": {
+                "1_product": int((doc_stats["product_count"] == 1).sum()),
+                "2_3_products": int(((doc_stats["product_count"] >= 2) & (doc_stats["product_count"] <= 3)).sum()),
+                "4_9_products": int(((doc_stats["product_count"] >= 4) & (doc_stats["product_count"] <= 9)).sum()),
+                "10_plus_products": int((doc_stats["product_count"] >= 10).sum()),
+            },
+            "max_products_in_doc": int(doc_stats["product_count"].max()),
+        },
+        evidence={
+            "dataset_id": dataset_id,
+            "artifacts": [f"transaction_graph_{graph_type}_edges.csv"],
+            "graph": f"G_{graph_type}",
+        },
+    )
+
+
+def best_savings_by_document(dataset_id: str, limit: int = 15) -> QueryResponse:
+    """
+    PUNTO 4: Mejores ahorros considerando co-compras en documentos.
+
+    Mejora Bellman-Ford actual: en lugar de ahorro por entidad-producto promedio,
+    busca documentos donde múltiples productos se compraron juntos (mismo proveedor)
+    y calcula ahorros considerando esa co-compra.
+    """
+    try:
+        edges = read_csv(dataset_id, "transaction_graph_purchases_edges.csv")
+        candidates = read_csv(dataset_id, "bellman_ford_candidates.csv")
+    except FileNotFoundError:
+        return QueryResponse(
+            ok=False,
+            error="Datos de Bellman-Ford no disponibles.",
+            algorithm="Bellman-Ford Document Co-occurrence"
+        )
+
+    edges["amount"] = pd.to_numeric(edges["amount"], errors="coerce").fillna(0)
+    edges["weight"] = pd.to_numeric(edges["weight"], errors="coerce").fillna(0)
+    candidates["savings_per_unit"] = pd.to_numeric(candidates["savings_per_unit"], errors="coerce").fillna(0)
+
+    # Encontrar documentos (nodos PURCHASE_DOC)
+    doc_edges = edges[edges["edge_type"] == "purchase_line"].copy()
+
+    if doc_edges.empty:
+        return QueryResponse(
+            ok=False,
+            error="No hay documentos en purchase graph.",
+            algorithm="Bellman-Ford Document Co-occurrence"
+        )
+
+    # Por cada documento, agrupar productos
+    doc_products: dict[str, list[dict]] = {}
+    for row in doc_edges.itertuples(index=False):
+        doc = row.source
+        prod = row.target.replace("PRODUCT:", "", 1)
+        if doc not in doc_products:
+            doc_products[doc] = []
+        doc_products[doc].append({
+            "product_id": prod,
+            "quantity": float(row.weight or 0),
+            "amount": float(row.amount or 0),
+        })
+
+    # Calcular ahorro potencial por documento
+    doc_savings = []
+    for doc, products in doc_products.items():
+        if len(products) < 2:
+            continue
+
+        total_products = len(products)
+        total_amount = sum(p["amount"] for p in products)
+        savings_in_doc = 0
+
+        for p in products:
+            pid = p["product_id"]
+            candidate = candidates[candidates["product_id"].astype(str) == pid]
+            if not candidate.empty:
+                savings_per_unit = float(candidate.iloc[0].get("savings_per_unit", 0))
+                savings_in_doc += savings_per_unit * p["quantity"]
+
+        if savings_in_doc > 0:
+            doc_savings.append({
+                "document": doc,
+                "product_count": total_products,
+                "total_amount": total_amount,
+                "total_savings": savings_in_doc,
+                "avg_savings_per_product": savings_in_doc / total_products,
+                "savings_pct": round((savings_in_doc / total_amount * 100) if total_amount > 0 else 0, 2),
+            })
+
+    if not doc_savings:
+        return QueryResponse(
+            ok=False,
+            error="No se encontraron documentos con potencial de ahorro.",
+            algorithm="Bellman-Ford Document Co-occurrence"
+        )
+
+    ranked = sorted(doc_savings, key=lambda x: x["total_savings"], reverse=True)[:limit]
+
+    table = [
+        {
+            "document": r["document"],
+            "products": r["product_count"],
+            "total_amount": round(r["total_amount"], 2),
+            "potential_savings": round(r["total_savings"], 2),
+            "savings_pct": f"{r['savings_pct']:.1f}%",
+        }
+        for r in ranked
+    ]
+
+    return QueryResponse(
+        answer=f"Análisis de {len(doc_products)} documentos de compra. Top {len(ranked)} documentos con mayor potencial de ahorro.",
+        algorithm="Bellman-Ford mejorado - Agregación por DOCUMENT nodes",
+        table=table,
+        metrics={
+            "total_documents_analyzed": int(len(doc_products)),
+            "documents_with_savings_potential": len(doc_savings),
+            "top_savings_document": round(ranked[0]["total_savings"], 2) if ranked else 0,
+            "total_potential_savings": round(sum(r["total_savings"] for r in doc_savings), 2),
+        },
+        evidence={
+            "dataset_id": dataset_id,
+            "artifacts": ["transaction_graph_purchases_edges.csv", "bellman_ford_candidates.csv"],
+            "graph": "G_purchases (document aggregation)",
+            "method": "Bellman-Ford candidates + DOCUMENT node grouping"
+        },
+    )
+
+
+def document_concentration_analysis(dataset_id: str, graph_type: str = "sales") -> QueryResponse:
+    """
+    PUNTO 5: Análisis de concentración de líneas.
+
+    ¿El negocio crece por volumen (muchos documentos simples) o por diversidad (documentos complejos)?
+    - Métrica: Coeficiente Gini de productos por documento
+    """
+    if graph_type not in ("sales", "purchases"):
+        graph_type = "sales"
+
+    try:
+        edges = read_csv(dataset_id, f"transaction_graph_{graph_type}_edges.csv")
+    except FileNotFoundError:
+        return QueryResponse(ok=False, error=f"Grafo G_{graph_type} no disponible.", algorithm="Concentration Analysis")
+
+    doc_edges = edges[edges["edge_type"].str.contains("line", na=False)]
+
+    if doc_edges.empty:
+        return QueryResponse(ok=False, error="No hay documentos.", algorithm="Concentration Analysis")
+
+    # Contar productos por documento
+    doc_product_counts = doc_edges.groupby("source")["target"].count().values
+
+    # Calcular Gini coefficient
+    sorted_counts = sorted(doc_product_counts)
+    n = len(sorted_counts)
+    gini = (2 * sum((i + 1) * val for i, val in enumerate(sorted_counts))) / (n * sum(sorted_counts)) - (n + 1) / n
+    gini = max(0, min(1, gini))  # Normalizar a [0, 1]
+
+    # Clasificación
+    if gini > 0.6:
+        concentration = "MUY CONCENTRADA (pocos documentos con muchos productos dominan el volumen)"
+    elif gini > 0.3:
+        concentration = "MODERADAMENTE CONCENTRADA (mezcla de documentos simples y complejos)"
+    else:
+        concentration = "DISTRIBUIDA (documentos similares en tamaño)"
+
+    # Estadísticas
+    percentiles = {
+        "p10": int(sorted(doc_product_counts)[int(n * 0.1)] if n > 10 else sorted_counts[0]),
+        "p50": int(sorted_counts[int(n * 0.5)]),
+        "p90": int(sorted_counts[int(n * 0.9)] if n > 10 else sorted_counts[-1]),
+    }
+
+    return QueryResponse(
+        answer=f"Distribución de {len(doc_product_counts)} documentos. Coeficiente Gini: {gini:.4f} ({concentration})",
+        algorithm="Concentration Analysis - Gini coefficient on DOCUMENT product distribution",
+        table=[
+            {
+                "metric": "Total documentos",
+                "value": int(n)
+            },
+            {
+                "metric": "Productos por documento (media)",
+                "value": round(sum(doc_product_counts) / n, 2)
+            },
+            {
+                "metric": "Productos por documento (mediana)",
+                "value": percentiles["p50"]
+            },
+            {
+                "metric": "Productos por documento (min)",
+                "value": int(min(doc_product_counts))
+            },
+            {
+                "metric": "Productos por documento (max)",
+                "value": int(max(doc_product_counts))
+            },
+            {
+                "metric": "Coeficiente Gini",
+                "value": round(gini, 4)
+            },
+            {
+                "metric": "Tipo distribución",
+                "value": concentration
+            },
+        ],
+        metrics={
+            "total_documents": int(n),
+            "gini_coefficient": round(gini, 4),
+            "mean_products_per_doc": round(sum(doc_product_counts) / n, 2),
+            "median_products_per_doc": percentiles["p50"],
+            "percentiles": percentiles,
+        },
+        evidence={
+            "dataset_id": dataset_id,
+            "artifacts": [f"transaction_graph_{graph_type}_edges.csv"],
+            "graph": f"G_{graph_type}",
+            "method": "Gini coefficient = (2 * Σ(i+1)*x_i) / (n*Σx_i) - (n+1)/n"
+        },
+    )
+

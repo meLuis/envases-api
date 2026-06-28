@@ -71,14 +71,42 @@ En Swagger ejecutar `POST /datasets` con:
 
 La respuesta devuelve un `dataset_id`. Usarlo en los endpoints:
 
+### Endpoints Existentes
 - `GET /datasets/{dataset_id}`
 - `GET /datasets/{dataset_id}/products/search?q=frasco gotero ambar`
-- `GET /datasets/{dataset_id}/clients/{client_id}/profile`
 - `GET /datasets/{dataset_id}/paths/client-to-supplier?client=ODONTOLOGIA&supplier=QUESITO`
 - `GET /datasets/{dataset_id}/products/5004/substitutes`
 - `POST /datasets/{dataset_id}/budget/optimize`
 - `GET /datasets/{dataset_id}/offers/best-savings`
 - `POST /datasets/{dataset_id}/purchase/optimize`
+- `GET /datasets/{dataset_id}/supply-chain/risk`
+- `GET /datasets/{dataset_id}/products/5004/cross-sell`
+
+### Nuevos Endpoints: Análisis de Documentos (5 algoritmos)
+
+**RECOMENDACIÓN: Market Basket Analysis**
+- `GET /datasets/{dataset_id}/products/{product_id}/co-occurrence?graph_type=sales&limit=15`
+  - Qué productos se compran en el MISMO COMPROBANTE (no solo el mismo cliente en cualquier momento)
+
+**Punto 2: Volatilidad de Producto**
+- `GET /datasets/{dataset_id}/products/{product_id}/volatility?graph_type=sales`
+  - ¿Aparece siempre con los mismos productos (dependiente) o con muchas combinaciones (versátil)?
+  - Métrica: Jaccard similarity promedio entre documentos
+
+**Punto 3: Eficiencia Logística**
+- `GET /datasets/{dataset_id}/documents/logistics-efficiency?graph_type=sales`
+  - Distribución de cuántos productos van por documento
+  - Análisis de pedidos simples (1-2 productos) vs complejos (10+ productos)
+
+**Punto 4: Mejores Ahorros por Documento**
+- `GET /datasets/{dataset_id}/supply/best-savings-by-document?limit=15`
+  - Mejora a Bellman-Ford: busca documentos donde múltiples productos se compraron juntos
+  - Calcula ahorros agregados por comprobante
+
+**Punto 5: Concentración de Líneas**
+- `GET /datasets/{dataset_id}/documents/concentration-analysis?graph_type=sales`
+  - Coeficiente Gini sobre distribución de productos por documento
+  - ¿Negocio crece por volumen (muchos documentos simples) o por diversidad (pocos complejos)?
 
 ## Algoritmos
 

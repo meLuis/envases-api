@@ -139,6 +139,62 @@ def cross_sell(dataset_id: str, product_id: str, limit: int = 10) -> QueryRespon
     return _query(lambda: queries.cross_sell(dataset_id, product_id, limit))
 
 
+# ============================================================================
+# ENDPOINTS DE ANALISIS DOCUMENTALES (5 algoritmos + recomendación)
+# ============================================================================
+
+@router.get("/datasets/{dataset_id}/products/{product_id}/co-occurrence", response_model=QueryResponse)
+def product_co_occurrence(dataset_id: str, product_id: str, graph_type: str = "sales", limit: int = 15) -> QueryResponse:
+    """
+    RECOMENDACIÓN: Market Basket Analysis.
+    Qué productos aparecen en el MISMO DOCUMENTO que uno dado.
+    Diferencia con cross-sell: cross-sell es histórico (cliente compró A y B en cualquier momento).
+    Co-occurrence es operativo (A y B estaban en la misma factura/comprobante).
+    """
+    return _query(lambda: queries.product_co_occurrence(dataset_id, product_id, graph_type, limit))
+
+
+@router.get("/datasets/{dataset_id}/products/{product_id}/volatility", response_model=QueryResponse)
+def product_volatility(dataset_id: str, product_id: str, graph_type: str = "sales") -> QueryResponse:
+    """
+    PUNTO 2: Volatilidad de co-compra.
+    ¿Un producto siempre aparece con los mismos otros, o varía? (Jaccard similarity).
+    Alta volatilidad = versátil. Baja volatilidad = dependiente de ciertos productos.
+    """
+    return _query(lambda: queries.product_volatility(dataset_id, product_id, graph_type))
+
+
+@router.get("/datasets/{dataset_id}/documents/logistics-efficiency", response_model=QueryResponse)
+def document_logistics_efficiency(dataset_id: str, graph_type: str = "sales") -> QueryResponse:
+    """
+    PUNTO 3: Eficiencia logística.
+    Patrones de documentos: distribución de cuántos productos van por documento,
+    volumen promedio, complejidad (simples vs. complejos).
+    """
+    return _query(lambda: queries.document_logistics_efficiency(dataset_id, graph_type))
+
+
+@router.get("/datasets/{dataset_id}/supply/best-savings-by-document", response_model=QueryResponse)
+def best_savings_by_document(dataset_id: str, limit: int = 15) -> QueryResponse:
+    """
+    PUNTO 4: Mejores ahorros considerando co-compras.
+    Mejora a Bellman-Ford: en lugar de ahorro por entidad-producto promedio,
+    busca documentos donde múltiples productos se compraron juntos (mismo proveedor)
+    y calcula ahorros considerando esa co-compra.
+    """
+    return _query(lambda: queries.best_savings_by_document(dataset_id, limit))
+
+
+@router.get("/datasets/{dataset_id}/documents/concentration-analysis", response_model=QueryResponse)
+def document_concentration_analysis(dataset_id: str, graph_type: str = "sales") -> QueryResponse:
+    """
+    PUNTO 5: Concentración de líneas.
+    ¿El negocio crece por volumen (muchos documentos simples) o por diversidad (documentos complejos)?
+    Métrica: Coeficiente Gini sobre distribución de productos por documento.
+    """
+    return _query(lambda: queries.document_concentration_analysis(dataset_id, graph_type))
+
+
 @router.get("/datasets/{dataset_id}/graph/summary")
 def graph_summary(dataset_id: str) -> dict:
     try:
