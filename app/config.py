@@ -16,6 +16,9 @@ MIN_UFDS_SIMILARITY = 0.75
 
 ALLOWED_ORIGINS = [
     origin.strip()
-    for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    for origin in os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000,https://cheerful-beignet-067d26.netlify.app",
+    ).split(",")
     if origin.strip()
 ]
