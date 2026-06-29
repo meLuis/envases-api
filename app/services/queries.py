@@ -5,7 +5,8 @@ from typing import Any
 import pandas as pd
 
 from app.core.algorithms import knapsack_budget, knapsack_supply_budget, optimize_purchase_flow
-from app.core.graphs import bfs_from_seeds, bfs_path, bidirectional_bfs_path, dijkstra_max_weight_path
+from app.core.graphs import bfs_path, bidirectional_bfs_path, dijkstra_max_weight_path
+from app.core.semantic_search import SemanticSearchIndex
 from app.core.text import normalize_text, similarity
 from app.domain.schemas import QueryResponse
 from app.storage.repository import read_csv, read_json
@@ -15,86 +16,115 @@ def dataset_summary(dataset_id: str) -> dict:
     return read_json(dataset_id, "dataset_summary.json")
 
 
+def _product_meta(products: pd.DataFrame) -> dict[str, dict[str, str]]:
+    """product_id → {name, stock, name_norm} desde products_clean."""
+    meta: dict[str, dict[str, str]] = {}
+    for row in products.itertuples(index=False):
+        pid = str(getattr(row, "product_id", ""))
+        meta[pid] = {
+            "name": str(getattr(row, "product_name", "")),
+            "stock": str(getattr(row, "stock", "")),
+            "name_norm": str(getattr(row, "product_name_norm", "")),
+        }
+    return meta
+
+
 def search_products(dataset_id: str, query: str, limit: int = 10) -> QueryResponse:
     products = read_csv(dataset_id, "products_clean.csv")
-    q = normalize_text(query)
-    q_terms = set(q.split()) if q else set()
+    meta = _product_meta(products)
 
-    # Intentar BFS sobre G_attr
-    bfs_scores: dict[str, float] = {}
-    # product_id → conjunto de etiquetas de atributos normalizadas (para filtro AND)
-    product_attr_terms: dict[str, set[str]] = {}
-    seeds: list[str] = []
+    # Buscador semántico por capas sobre G_attr (BFS multi-semilla + coverage
+    # boost + filtro numérico exacto). Si no hay grafo o el query no resuelve
+    # ninguna semilla, se cae a similitud textual sobre el catálogo.
+    graph_results: list[dict] = []
+    seed_info: dict = {}
+    graph_understood_query = False
     used_graph = False
     try:
         attr_nodes = read_csv(dataset_id, "semantic_attribute_graph_nodes.csv")
         attr_edges = read_csv(dataset_id, "semantic_attribute_graph_edges.csv")
-        seeds = [
-            str(row.node_id)
-            for row in attr_nodes.itertuples(index=False)
-            if row.node_type == "ATTRIBUTE" and q_terms and normalize_text(str(row.label)) in q_terms
-        ]
-        if seeds:
-            reached = bfs_from_seeds(attr_edges, seeds, target_type_prefix="PRODUCT:", max_depth=3)
-            for node_id, depth in reached.items():
-                product_id = node_id.replace("PRODUCT:", "", 1)
-                bfs_scores[product_id] = 0.95 if depth == 1 else 0.70
-            used_graph = bool(bfs_scores)
-
-        # Construir mapa product → atributos para el filtro AND multi-término
-        if len(q_terms) > 1:
-            for edge_row in attr_edges.itertuples(index=False):
-                src, tgt = str(edge_row.source), str(edge_row.target)
-                if src.startswith("PRODUCT:") and tgt.startswith("ATTR:"):
-                    pid = src.replace("PRODUCT:", "", 1)
-                    # "ATTR:material:VIDRIO" → tomar todo desde el tercer segmento
-                    label = normalize_text(tgt.split(":", 2)[-1]) if tgt.count(":") >= 2 else ""
-                    if label:
-                        product_attr_terms.setdefault(pid, set()).add(label)
+        index = SemanticSearchIndex.from_frames(attr_nodes, attr_edges)
+        graph_results = index.search(query, k=limit)
+        seed_info = index.last_stats
+        graph_understood_query = bool(seed_info.get("seeds") or seed_info.get("unresolved_exact_filters"))
+        used_graph = bool(graph_results)
     except FileNotFoundError:
         pass
 
+    if used_graph or graph_understood_query:
+        rows = []
+        for item in graph_results:
+            pid = str(item["product"]).replace("PRODUCT:", "", 1)
+            info = meta.get(pid, {})
+            rows.append(
+                {
+                    "product_id": pid,
+                    "product_name": info.get("name") or item.get("label", ""),
+                    "score": item["relevance"],
+                    "seed_coverage": f"{item['seed_coverage']}/{item['total_seeds']}",
+                    "stock": info.get("stock", ""),
+                    "match_source": "graph",
+                }
+            )
+        return QueryResponse(
+            answer=f"Se encontraron {len(rows)} productos compatibles con '{query}'.",
+            algorithm=(
+                "Búsqueda semántica sobre G_attr: BFS multi-semilla con decaimiento por "
+                "distancia, intersección estricta de conceptos resueltos, boost por cobertura "
+                "y filtros numéricos exactos (capacidad/boca)."
+            ),
+            table=rows,
+            metrics={
+                "matches": len(rows),
+                "limit": limit,
+                "seeds": len(seed_info.get("seeds", [])),
+                "seed_groups": seed_info.get("seed_groups", 0),
+                "exact_filters": seed_info.get("exact_filters", 0),
+                "expanded_nodes": seed_info.get("expanded_nodes", 0),
+                "scored_products": seed_info.get("scored_products", 0),
+                "strict_candidates": seed_info.get("strict_candidates", len(rows)),
+                "unresolved_exact_filters": seed_info.get("unresolved_exact_filters", []),
+            },
+            evidence={
+                "dataset_id": dataset_id,
+                "artifacts": [
+                    "products_clean.csv",
+                    "semantic_attribute_graph_nodes.csv",
+                    "semantic_attribute_graph_edges.csv",
+                ],
+                "graph": "G_attr",
+            },
+        )
+
+    # Fallback textual (sin grafo o sin semillas resueltas).
+    q = normalize_text(query)
+    q_terms = set(q.split()) if q else set()
     rows = []
     for row in products.itertuples(index=False):
-        text_score = similarity(q, str(row.product_name_norm))
-        if q and q in str(row.product_name_norm):
+        name_norm = str(getattr(row, "product_name_norm", "") or "")
+        text_score = similarity(q, name_norm)
+        if q and q in name_norm:
             text_score = max(text_score, 0.98)
-        graph_score = bfs_scores.get(str(row.product_id), 0.0)
-        score = max(graph_score, text_score * 0.6) if used_graph else text_score
-        if score < 0.35:
+        if text_score < 0.35:
             continue
-
-        # Filtro AND: en búsquedas multi-término todos deben estar presentes
-        # en los atributos del producto O en su nombre normalizado
-        if len(q_terms) > 1:
-            pid = str(row.product_id)
-            attrs = product_attr_terms.get(pid, set())
-            name_words = set(str(row.product_name_norm).split())
-            available = attrs | name_words
-            if not all(term in available for term in q_terms):
-                continue
-
-        rows.append({
-            "product_id": row.product_id,
-            "product_name": row.product_name,
-            "score": round(score, 4),
-            "stock": row.stock,
-            "match_source": "graph+text" if graph_score > 0 else "text",
-        })
-
+        if len(q_terms) > 1 and not all(term in set(name_norm.split()) for term in q_terms):
+            continue
+        rows.append(
+            {
+                "product_id": getattr(row, "product_id", ""),
+                "product_name": getattr(row, "product_name", ""),
+                "score": round(text_score, 4),
+                "stock": getattr(row, "stock", ""),
+                "match_source": "text",
+            }
+        )
     rows = sorted(rows, key=lambda item: item["score"], reverse=True)[:limit]
-
-    algo = (
-        "BFS sobre G_attr (prof. 1=atributo exacto, prof. 3=atributo compartido) + filtro AND multi-termino + similitud textual"
-        if used_graph
-        else "Similitud textual + filtro AND multi-termino"
-    )
     return QueryResponse(
         answer=f"Se encontraron {len(rows)} productos compatibles con '{query}'.",
-        algorithm=algo,
+        algorithm="Similitud textual + filtro AND multi-término (sin grafo de atributos disponible).",
         table=rows,
-        metrics={"matches": len(rows), "limit": limit, "bfs_seeds": len(seeds), "bfs_reached": len(bfs_scores)},
-        evidence={"dataset_id": dataset_id, "artifacts": ["products_clean.csv", "semantic_attribute_graph_nodes.csv", "semantic_attribute_graph_edges.csv"], "graph": "G_attr"},
+        metrics={"matches": len(rows), "limit": limit, "seeds": 0},
+        evidence={"dataset_id": dataset_id, "artifacts": ["products_clean.csv"], "graph": "G_attr"},
     )
 
 
@@ -870,4 +900,3 @@ def document_concentration_analysis(dataset_id: str, graph_type: str = "sales") 
             "method": "Gini coefficient = (2 * Σ(i+1)*x_i) / (n*Σx_i) - (n+1)/n"
         },
     )
-

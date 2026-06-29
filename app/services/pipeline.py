@@ -6,14 +6,21 @@ from typing import BinaryIO
 
 import pandas as pd
 
-from app.config import MIN_ATTRIBUTE_COVERAGE, MIN_GRAPH_EDGES, MIN_PRODUCT_ROWS, MIN_TRANSACTION_ROWS
+from app.config import (
+    ENABLE_GRAPH_IMAGES,
+    MIN_ATTRIBUTE_COVERAGE,
+    MIN_GRAPH_EDGES,
+    MIN_PRODUCT_ROWS,
+    MIN_TRANSACTION_ROWS,
+)
 from app.core.algorithms import bellman_ford_savings, build_supply_options, families_from_projection
 from app.core.attributes import extract_product_attributes
+from app.core.attribute_llm import gemini_available, refine_rules_with_gemini
 from app.core.graphs import build_product_projection, build_semantic_graph, build_transaction_graphs
 from app.core.io import read_table
 from app.core.normalization import normalize_all, profile_frames, quality_summary
 from app.domain.schemas import ArtifactStatus, DatasetSummary
-from app.storage.repository import ensure_dataset_dir, new_dataset_id, write_csv, write_json
+from app.storage.repository import dataset_dir, ensure_dataset_dir, new_dataset_id, write_csv, write_json
 
 
 class PipelineError(ValueError):
@@ -85,6 +92,13 @@ def _build_dataset(dataset_id: str, raw: dict[str, pd.DataFrame]) -> DatasetSumm
         generated.append(ArtifactStatus(name=name, kind="base"))
 
     attributes, attr_report = extract_product_attributes(cleaned["products"])
+    # Refinamiento opcional con Gemini (solo si hay GEMINI_API_KEY): propone
+    # reglas nuevas y se aceptan solo si mejoran sin regresión. Failsafe.
+    if gemini_available():
+        attributes, attr_report, llm_info = refine_rules_with_gemini(cleaned["products"], attributes, attr_report)
+        write_json(dataset_id, "attribute_llm_refinement.json", llm_info)
+        generated.append(ArtifactStatus(name="attribute_llm_refinement.json", kind="semantic"))
+        warnings.append(f"Gemini: {llm_info.get('status')} ({llm_info.get('reason', llm_info.get('source_model', ''))}).")
     if attr_report["coverage"] >= MIN_ATTRIBUTE_COVERAGE:
         write_csv(dataset_id, "product_attributes.csv", attributes)
         write_json(dataset_id, "attribute_extraction_report.json", attr_report)
@@ -113,6 +127,20 @@ def _build_dataset(dataset_id: str, raw: dict[str, pd.DataFrame]) -> DatasetSumm
                     "semantic_attribute_graph_metrics.json",
                 ]
             )
+            # PNG estáticos de G_attr (opcional, failsafe: nunca bloquea el dataset).
+            if ENABLE_GRAPH_IMAGES:
+                try:
+                    from app.core.graph_visualizer import render_graph_visualizations
+
+                    dataset_path = dataset_dir(dataset_id)
+                    images = render_graph_visualizations(dataset_path, dataset_path)
+                    generated.extend(
+                        ArtifactStatus(name=name, kind="visualization")
+                        for name in images
+                        if (dataset_path / name).exists()
+                    )
+                except Exception as exc:  # noqa: BLE001 — visualización es accesoria
+                    warnings.append(f"Imágenes de G_attr no generadas: {exc}")
         else:
             omitted.append(ArtifactStatus(name="G_attr", kind="graph", generated=False, reason="Menos aristas que el minimo configurado."))
         if len(projection_edges) >= MIN_GRAPH_EDGES:
@@ -217,7 +245,7 @@ def _company_rules() -> dict:
     return {
         "domain": "envases_vidrio_plastico",
         "required_files": ["productos", "ventas", "compras"],
-        "llm": "disabled",
+        "llm": "enabled_gemini" if gemini_available() else "disabled",
         "main_algorithms": ["BFS", "BFS bidireccional", "Programacion dinamica", "Bellman-Ford", "UFDS"],
         "extra_algorithm": "Min-cost flow",
     }

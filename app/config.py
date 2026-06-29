@@ -14,6 +14,10 @@ MIN_ATTRIBUTE_COVERAGE = 0.35
 MIN_GRAPH_EDGES = 5
 MIN_UFDS_SIMILARITY = 0.75
 
+# Genera los PNG estáticos de G_attr al construir el dataset (matplotlib/networkx).
+# Se puede desactivar (ENABLE_GRAPH_IMAGES=0) si el host va justo de recursos.
+ENABLE_GRAPH_IMAGES = os.getenv("ENABLE_GRAPH_IMAGES", "1").strip().lower() not in {"0", "false", "no"}
+
 ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv(

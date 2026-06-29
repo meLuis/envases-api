@@ -3,43 +3,156 @@ from __future__ import annotations
 from collections import defaultdict, deque
 import heapq
 from itertools import combinations
+import json
 from typing import Any
 
 import pandas as pd
 
+from app.core.text import normalize_text
+
+
+# Capas semánticas de G_attr: (columna en product_attributes, node_type, relación).
+# Cada valor distinto de una capa es un nodo propio (TYPE:FRASCO, COLOR:AMBAR…).
+ATTRIBUTE_SPECS = [
+    ("product_type", "TYPE", "HAS_TYPE"),
+    ("subtype", "SUBTYPE", "HAS_SUBTYPE"),
+    ("accessory", "ACCESSORY", "HAS_ACCESSORY"),
+    ("shape", "SHAPE", "HAS_SHAPE"),
+    ("feature", "FEATURE", "HAS_FEATURE"),
+    ("material", "MATERIAL", "HAS_MATERIAL"),
+    ("color", "COLOR", "HAS_COLOR"),
+    ("capacity_text", "CAPACITY", "HAS_CAPACITY"),
+    ("mouth_size_text", "MOUTH_SIZE", "HAS_MOUTH_SIZE"),
+]
+
+# Clave dentro de attribute_confidence (JSON por producto) para cada columna.
+CONFIDENCE_KEYS = {
+    "product_type": "product_type",
+    "subtype": "subtype",
+    "accessory": "accessory",
+    "shape": "shape",
+    "feature": "feature",
+    "material": "material",
+    "color": "color",
+    "capacity_text": "capacity",
+    "mouth_size_text": "mouth_size",
+}
+
+MIN_ATTRIBUTE_CONFIDENCE = 0.75
+
+
+def _stable(value: object) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in {"nan", "none"} else text
+
+
+def attr_node_id(node_type: str, value: object) -> str:
+    """Id de nodo de atributo: TYPE:FRASCO, COLOR:AMBAR, CAPACITY:100ML."""
+    norm = normalize_text(value).replace(" ", "_")
+    return f"{node_type}:{norm}"
+
+
+def _split_values(value: object) -> list[str]:
+    text = _stable(value)
+    if not text:
+        return []
+    return [part.strip() for part in text.split("|") if part.strip()]
+
+
+def _parse_confidence(value: object) -> dict[str, float]:
+    text = _stable(value)
+    if not text:
+        return {}
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {str(k): float(v) for k, v in payload.items() if isinstance(v, (int, float))}
+
+
+def _prepare_attributes(attributes: pd.DataFrame) -> pd.DataFrame:
+    """Deriva capacity_text ('100ML') y mouth_size_text ('18MM') para las capas."""
+    prepared = attributes.copy()
+
+    def cap_text(row: pd.Series) -> str:
+        value = row.get("capacity_value")
+        unit = row.get("capacity_unit")
+        if _stable(value) and _stable(unit):
+            try:
+                return f"{float(value):g}{str(unit).upper()}"
+            except (TypeError, ValueError):
+                return ""
+        return ""
+
+    def mouth_text(row: pd.Series) -> str:
+        value = row.get("mouth_size_mm")
+        if _stable(value):
+            try:
+                return f"{float(value):g}MM"
+            except (TypeError, ValueError):
+                return ""
+        return ""
+
+    prepared["capacity_text"] = prepared.apply(cap_text, axis=1) if not prepared.empty else ""
+    prepared["mouth_size_text"] = prepared.apply(mouth_text, axis=1) if not prepared.empty else ""
+    return prepared
+
 
 def build_semantic_graph(attributes: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """G_attr en capas: PRODUCT ↔ {TYPE, SUBTYPE, …, CAPACITY, MOUTH_SIZE}.
+
+    Cada valor distinto de una capa es un nodo (TYPE:FRASCO, COLOR:AMBAR…).
+    El peso de la arista es la confianza de extracción de ESE atributo; el
+    filtro min_confidence se aplica por atributo (un atributo débil no descarta
+    los fuertes del mismo producto).
+    """
+    data = _prepare_attributes(attributes)
     nodes: dict[str, dict[str, Any]] = {}
     edges = []
-    attr_cols = ["product_type", "material", "color", "capacity", "mouth", "features", "category_use"]
-    for row in attributes.itertuples(index=False):
-        product_node = f"PRODUCT:{row.product_id}"
+    for row in data.itertuples(index=False):
+        product_id = _stable(getattr(row, "product_id", ""))
+        if not product_id:
+            continue
+        product_node = f"PRODUCT:{product_id}"
         nodes[product_node] = {
             "node_id": product_node,
             "node_type": "PRODUCT",
-            "label": row.product_name,
-            "ref": row.product_id,
+            "label": _stable(getattr(row, "product_name", "")),
+            "ref": product_id,
         }
-        for col in attr_cols:
-            raw = getattr(row, col)
-            values = str(raw).split("|") if col == "features" and raw else [raw]
-            for value in values:
-                value = str(value or "").strip()
-                if not value:
-                    continue
-                attr_node = f"ATTR:{col}:{value}"
-                nodes[attr_node] = {
-                    "node_id": attr_node,
-                    "node_type": "ATTRIBUTE",
-                    "label": value,
-                    "ref": col,
-                }
+
+        product_conf = 0.0
+        try:
+            product_conf = float(getattr(row, "confidence", 0) or 0)
+        except (TypeError, ValueError):
+            product_conf = 0.0
+        confidences = _parse_confidence(getattr(row, "attribute_confidence", ""))
+
+        for column, attr_type, relation in ATTRIBUTE_SPECS:
+            attr_conf = confidences.get(CONFIDENCE_KEYS[column], product_conf)
+            if attr_conf < MIN_ATTRIBUTE_CONFIDENCE:
+                continue
+            for value in _split_values(getattr(row, column, "")):
+                attr_node = attr_node_id(attr_type, value)
+                nodes.setdefault(
+                    attr_node,
+                    {
+                        "node_id": attr_node,
+                        "node_type": attr_type,
+                        "label": value,
+                        "ref": column,
+                    },
+                )
                 edges.append(
                     {
                         "source": product_node,
                         "target": attr_node,
-                        "edge_type": col,
-                        "weight": 1.0,
+                        "edge_type": relation,
+                        "weight": round(attr_conf, 4),
                     }
                 )
     node_df = pd.DataFrame(nodes.values())
@@ -48,19 +161,20 @@ def build_semantic_graph(attributes: pd.DataFrame) -> tuple[pd.DataFrame, pd.Dat
 
 
 def build_product_projection(attributes: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    attr_cols = ["product_type", "material", "color", "capacity", "mouth", "features", "category_use"]
+    data = _prepare_attributes(attributes)
+    attr_cols = [column for column, _type, _rel in ATTRIBUTE_SPECS]
     product_attrs: dict[str, set[str]] = {}
     names: dict[str, str] = {}
-    for row in attributes.itertuples(index=False):
+    for row in data.itertuples(index=False):
+        product_id = _stable(getattr(row, "product_id", ""))
+        if not product_id:
+            continue
         values = set()
         for col in attr_cols:
-            raw = getattr(row, col)
-            for value in str(raw or "").split("|"):
-                value = value.strip()
-                if value:
-                    values.add(f"{col}:{value}")
-        product_attrs[str(row.product_id)] = values
-        names[str(row.product_id)] = str(row.product_name)
+            for value in _split_values(getattr(row, col, "")):
+                values.add(f"{col}:{value}")
+        product_attrs[product_id] = values
+        names[product_id] = _stable(getattr(row, "product_name", ""))
     rows = []
     for left, right in combinations(product_attrs, 2):
         union = product_attrs[left] | product_attrs[right]
