@@ -127,20 +127,6 @@ def _build_dataset(dataset_id: str, raw: dict[str, pd.DataFrame]) -> DatasetSumm
                     "semantic_attribute_graph_metrics.json",
                 ]
             )
-            # PNG estáticos de G_attr (opcional, failsafe: nunca bloquea el dataset).
-            if ENABLE_GRAPH_IMAGES:
-                try:
-                    from app.core.graph_visualizer import render_graph_visualizations
-
-                    dataset_path = dataset_dir(dataset_id)
-                    images = render_graph_visualizations(dataset_path, dataset_path)
-                    generated.extend(
-                        ArtifactStatus(name=name, kind="visualization")
-                        for name in images
-                        if (dataset_path / name).exists()
-                    )
-                except Exception as exc:  # noqa: BLE001 — visualización es accesoria
-                    warnings.append(f"Imágenes de G_attr no generadas: {exc}")
         else:
             omitted.append(ArtifactStatus(name="G_attr", kind="graph", generated=False, reason="Menos aristas que el minimo configurado."))
         if len(projection_edges) >= MIN_GRAPH_EDGES:
@@ -180,6 +166,21 @@ def _build_dataset(dataset_id: str, raw: dict[str, pd.DataFrame]) -> DatasetSumm
             )
     else:
         omitted.append(ArtifactStatus(name="transaction_graphs", kind="graph", generated=False, reason="Ventas o compras no alcanzan filas minimas."))
+
+    # PNG estáticos de grafos principales (opcional, failsafe: nunca bloquea el dataset).
+    if ENABLE_GRAPH_IMAGES:
+        try:
+            from app.core.graph_visualizer import render_graph_visualizations
+
+            dataset_path = dataset_dir(dataset_id)
+            images = render_graph_visualizations(dataset_path, dataset_path)
+            generated.extend(
+                ArtifactStatus(name=name, kind="visualization")
+                for name in images
+                if (dataset_path / name).exists()
+            )
+        except Exception as exc:  # noqa: BLE001 — visualización es accesoria
+            warnings.append(f"Imágenes de grafos no generadas: {exc}")
 
     options = build_supply_options(cleaned["purchases"])
     if not options.empty:
@@ -273,4 +274,3 @@ def _transaction_flags(sales: pd.DataFrame, purchases: pd.DataFrame) -> pd.DataF
             {"dataset": "purchases", "rows": len(purchases), "zero_quantity": int((purchases["quantity"] <= 0).sum()), "zero_total": int((purchases["total"] <= 0).sum())},
         ]
     )
-

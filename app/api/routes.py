@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
+from app.config import ENABLE_GRAPH_IMAGES
 from app.domain.schemas import BudgetRequest, PurchaseOptimizeRequest, QueryResponse
 from app.services import queries
 from app.services.pipeline import PipelineError, build_dataset_from_uploads
@@ -10,6 +11,20 @@ from app.storage.repository import list_artifact_files, require_dataset_dir, lis
 
 
 router = APIRouter()
+
+GRAPH_VISUALIZATION_ARTIFACTS = {
+    "g_attr_full.png",
+    "g_attr_attribute_projection.png",
+    "g_attr_product_attribute_focus.png",
+    "g_attr_frasco_vidrio_ambar.png",
+    "g_sales_full.png",
+    "g_sales_overview.png",
+    "g_purchases_full.png",
+    "g_purchases_overview.png",
+    "g_business_full.png",
+    "g_business_overview.png",
+    "visualization_manifest.json",
+}
 
 
 @router.get("/health")
@@ -86,6 +101,13 @@ def get_artifact(dataset_id: str, artifact_name: str):
         path = require_dataset_dir(dataset_id) / artifact_name
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if ENABLE_GRAPH_IMAGES and artifact_name in GRAPH_VISUALIZATION_ARTIFACTS and not path.exists():
+        try:
+            from app.core.graph_visualizer import render_graph_visualizations
+
+            render_graph_visualizations(path.parent, path.parent)
+        except Exception:  # noqa: BLE001 - la descarga debe responder 404 si la visualización no se pudo crear
+            pass
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Artefacto no encontrado.")
     return FileResponse(path)
@@ -210,4 +232,3 @@ def _query(call):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error ejecutando consulta: {exc}") from exc
-
