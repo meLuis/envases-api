@@ -273,8 +273,10 @@ def full_attribute_layout(graph) -> dict[str, tuple[float, float]]:
 
 
 def draw_full_attribute_graph(graph, output_path, mpatches, plt, nx) -> str:
-    pos = full_attribute_layout(graph)
-    fig, ax = plt.subplots(figsize=(30, 17), dpi=180)
+    # Circular: capas de atributos (agrupadas por capa) en el aro interno y los
+    # productos en el aro exterior.
+    pos = concentric_layout(_rings_by_count(graph, [list(LAYER_ORDER), ["PRODUCT"]]))
+    fig, ax = plt.subplots(figsize=(24, 24), dpi=180)
     fig.patch.set_facecolor("#0b1020")
     ax.set_facecolor("#0b1020")
 
@@ -305,13 +307,7 @@ def draw_full_attribute_graph(graph, output_path, mpatches, plt, nx) -> str:
     labels = {node: str(graph.nodes[node].get("label", node))[:20] for node in label_nodes}
     nx.draw_networkx_labels(graph, pos, labels=labels, font_size=5.5, font_color="#f8fafc", font_weight="bold", ax=ax)
 
-    for node_type, x in [("PRODUCT", -2.2)] + [(node_type, index * 2.4) for index, node_type in enumerate(LAYER_ORDER)]:
-        if any(data.get("node_type") == node_type for _, data in graph.nodes(data=True)):
-            ax.text(
-                x, ax.get_ylim()[1] + 0.3, node_type.replace("_", " "),
-                color=NODE_COLORS[node_type], fontsize=10, fontweight="bold", ha="center",
-            )
-
+    ax.set_aspect("equal")
     ax.set_title(
         f"G_attr - grafo completo ({graph.number_of_nodes()} nodos, {graph.number_of_edges()} aristas)",
         color="#f8fafc", fontsize=16, fontweight="bold", loc="left", pad=18,
@@ -523,12 +519,64 @@ def transaction_full_layout(graph) -> dict[str, tuple[float, float]]:
     return pos
 
 
+def concentric_layout(rings: list[list[str]]) -> dict[str, tuple[float, float]]:
+    """Coloca cada anillo (lista de nodos, de adentro hacia afuera) en un círculo.
+
+    Los anillos se espacian de forma UNIFORME (radio = índice del anillo): así
+    quedan aros concéntricos limpios y parejos que llenan el disco, sin huecos
+    enormes. El llamador ordena los anillos de menor a mayor cantidad, de modo
+    que el aro más interno (menos circunferencia) lleva el grupo más pequeño.
+    """
+    pos: dict[str, tuple[float, float]] = {}
+    non_empty = [ring for ring in rings if ring]
+    radius_step = 1.0
+    for ring_index, nodes in enumerate(non_empty):
+        radius = (ring_index + 1) * radius_step
+        count = len(nodes)
+        for index, node in enumerate(nodes):
+            angle = 2 * math.pi * index / count - math.pi / 2
+            pos[node] = (radius * math.cos(angle), radius * math.sin(angle))
+    return pos
+
+
+def _rings_by_count(graph, groups: list[list[str]]) -> list[list[str]]:
+    """Construye anillos por grupos de tipos, ordenados de menor a mayor tamaño.
+
+    Cada grupo es una lista de node_types que comparten anillo. Dentro del anillo
+    los nodos quedan contiguos por tipo y ordenados por grado (los hubs juntos).
+    """
+    by_type: dict[str, list[str]] = {}
+    for node, data in graph.nodes(data=True):
+        by_type.setdefault(data.get("node_type", "OTHER"), []).append(node)
+
+    placed: set[str] = set()
+    rings: list[list[str]] = []
+    for group in groups:
+        ring: list[str] = []
+        for node_type in group:
+            members = sorted(by_type.get(node_type, []), key=lambda n: graph.degree(n), reverse=True)
+            ring.extend(members)
+            placed.update(members)
+        if ring:
+            rings.append(ring)
+    # Cualquier tipo no contemplado va en un anillo extra.
+    leftover = [n for n in graph.nodes if n not in placed]
+    if leftover:
+        rings.append(sorted(leftover, key=lambda n: graph.degree(n), reverse=True))
+    rings.sort(key=len)  # menor adentro, mayor afuera
+    return rings
+
+
 def draw_transaction_full_graph(graph, output_path, title: str, mpatches, plt, nx) -> str:
-    fig, ax = plt.subplots(figsize=(30, 17), dpi=180)
+    fig, ax = plt.subplots(figsize=(24, 24), dpi=180)
     fig.patch.set_facecolor("#0b1020")
     ax.set_facecolor("#0b1020")
 
-    pos = transaction_full_layout(graph)
+    # Layout circular: anillos concéntricos por tipo (entidades dentro, el grupo
+    # más numeroso en el aro exterior).
+    pos = concentric_layout(
+        _rings_by_count(graph, [["CLIENT"], ["SUPPLIER"], ["DOCUMENT"], ["PRODUCT"]])
+    )
     edge_widths = []
     for _, _, data in graph.edges(data=True):
         amount = abs(_to_float(data.get("amount", 0), 0.0))
@@ -537,7 +585,7 @@ def draw_transaction_full_graph(graph, output_path, title: str, mpatches, plt, n
         edge_widths.append(max(0.08, min(0.85, math.log1p(basis) * 0.09)))
 
     nx.draw_networkx_edges(
-        graph, pos, ax=ax, edge_color="#94a3b8", alpha=0.12,
+        graph, pos, ax=ax, edge_color="#94a3b8", alpha=0.05,
         width=edge_widths,
     )
 
@@ -562,20 +610,7 @@ def draw_transaction_full_graph(graph, output_path, title: str, mpatches, plt, n
         font_weight="bold", ax=ax,
     )
 
-    for node_type, x in {
-        "CLIENT": -4.4,
-        "SUPPLIER": -3.2,
-        "DOCUMENT": 0.0,
-        "PRODUCT": 4.0,
-        "OTHER": 1.8,
-    }.items():
-        if any(data.get("node_type") == node_type for _, data in graph.nodes(data=True)):
-            ax.text(
-                x, ax.get_ylim()[1] + 0.3, node_type,
-                color=NODE_COLORS.get(node_type, "#94a3c4"),
-                fontsize=11, fontweight="bold", ha="center",
-            )
-
+    ax.set_aspect("equal")
     ax.set_title(
         f"{title} - grafo completo ({graph.number_of_nodes()} nodos, {graph.number_of_edges()} aristas)",
         color="#f8fafc", fontsize=16, fontweight="bold", loc="left", pad=18,
