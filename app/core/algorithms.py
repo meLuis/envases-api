@@ -116,9 +116,15 @@ def knapsack_budget(products: pd.DataFrame, items: list[dict[str, Any]], budget:
         counts[item["product_id"]] += 1
         total_cost += item["cost"]
     plan = [{"product_id": pid, "units": units} for pid, units in sorted(counts.items())]
+    # Ítems candidatos (costo + valor por unidad) para reconstruir la tabla DP en el front.
+    items_view = [
+        {"product_id": it["product_id"], "cost": round(float(it["cost"]), 2), "value": round(float(it["value"]), 4)}
+        for it in expanded[:12]
+    ]
     return {
         "method": "knapsack_dp",
         "plan": plan,
+        "items": items_view,
         "total_units": sum(counts.values()),
         "total_cost": round(total_cost, 2),
         "budget_left": round(budget - total_cost, 2),
@@ -165,7 +171,7 @@ def knapsack_supply_budget(options: pd.DataFrame, items: list[dict[str, Any]], b
             remaining_units -= assignable
     capacity = int(round(max(budget, 0) * 100))
     if not lots or capacity <= 0:
-        return {"method": "knapsack_dp", "plan": [], "total_units": 0, "total_cost": 0.0, "budget_left": budget, "score": 0.0}
+        return {"method": "knapsack_dp", "plan": [], "items": [], "total_units": 0, "total_cost": 0.0, "budget_left": budget, "score": 0.0}
     dp = [0.0] * (capacity + 1)
     keep = [[False] * (capacity + 1) for _ in lots]
     costs = [min(int(round(lot["cost"] * 100)), capacity + 1) for lot in lots]
@@ -199,12 +205,17 @@ def knapsack_supply_budget(options: pd.DataFrame, items: list[dict[str, Any]], b
         row["units"] += item["units"]
         row["cost"] += item["cost"]
     total_cost = sum(item["cost"] for item in chosen)
+    items_view = [
+        {"product_id": lot["product_id"], "cost": round(float(lot["cost"]), 2), "value": round(float(lot["value"]), 4)}
+        for lot in lots[:12]
+    ]
     return {
         "method": "knapsack_dp",
         "plan": [
             {key: round(value, 2) if isinstance(value, float) else value for key, value in item.items() if key != "value"}
             for item in aggregate.values()
         ],
+        "items": items_view,
         "total_units": round(sum(item["units"] for item in chosen), 2),
         "total_cost": round(total_cost, 2),
         "budget_left": round(budget - total_cost, 2),
