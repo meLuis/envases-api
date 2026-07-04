@@ -61,6 +61,7 @@ def search_products(dataset_id: str, query: str, limit: int = 10) -> QueryRespon
                     "product_id": pid,
                     "product_name": info.get("name") or item.get("label", ""),
                     "score": item["relevance"],
+                    "units_sold": item.get("units_sold", 0),
                     "seed_coverage": f"{item['seed_coverage']}/{item['total_seeds']}",
                     "stock": info.get("stock", ""),
                     "match_source": "graph",

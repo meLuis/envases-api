@@ -86,7 +86,8 @@ def _build_dataset(dataset_id: str, raw: dict[str, pd.DataFrame]) -> DatasetSumm
 
     write_csv(dataset_id, "quality_summary.csv", quality_summary(cleaned))
     write_csv(dataset_id, "product_matches.csv", _product_matches(cleaned["products"], cleaned["sales"], cleaned["purchases"]))
-    write_csv(dataset_id, "product_activity_summary.csv", _product_activity(cleaned["sales"], cleaned["purchases"]))
+    product_activity = _product_activity(cleaned["sales"], cleaned["purchases"])
+    write_csv(dataset_id, "product_activity_summary.csv", product_activity)
     write_csv(dataset_id, "transaction_flags_summary.csv", _transaction_flags(cleaned["sales"], cleaned["purchases"]))
     for name in ["quality_summary.csv", "product_matches.csv", "product_activity_summary.csv", "transaction_flags_summary.csv"]:
         generated.append(ArtifactStatus(name=name, kind="base"))
@@ -113,7 +114,7 @@ def _build_dataset(dataset_id: str, raw: dict[str, pd.DataFrame]) -> DatasetSumm
                 "attribute_coverage_report.csv",
             ]
         )
-        semantic_nodes, semantic_edges, semantic_metrics = build_semantic_graph(attributes)
+        semantic_nodes, semantic_edges, semantic_metrics = build_semantic_graph(attributes, activity=product_activity)
         projection_edges, projection_metrics = build_product_projection(attributes)
         if len(semantic_edges) >= MIN_GRAPH_EDGES:
             write_csv(dataset_id, "semantic_attribute_graph_nodes.csv", semantic_nodes)

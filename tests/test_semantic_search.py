@@ -50,3 +50,41 @@ def test_semantic_search_exact_missing_capacity_returns_no_results() -> None:
 
     assert index.search("frasco vidrio ambar 123ml", k=10) == []
     assert index.last_stats["unresolved_exact_filters"] == ["capacity:123ML"]
+
+
+def _index_with_sales() -> SemanticSearchIndex:
+    # Dos frascos ambar 100ML que cumplen TODA la consulta; P2 vende más.
+    nodes = pd.DataFrame(
+        [
+            {"node_id": "PRODUCT:P1", "node_type": "PRODUCT", "label": "FRASCO AMBAR 100ML A", "units_sold": 5},
+            {"node_id": "PRODUCT:P2", "node_type": "PRODUCT", "label": "FRASCO AMBAR 100ML B", "units_sold": 42},
+            {"node_id": "TYPE:FRASCO", "node_type": "TYPE", "label": "frasco", "units_sold": ""},
+            {"node_id": "COLOR:AMBAR", "node_type": "COLOR", "label": "AMBAR", "units_sold": ""},
+            {"node_id": "CAPACITY:100ML", "node_type": "CAPACITY", "label": "100ML", "units_sold": ""},
+        ]
+    )
+    edges = pd.DataFrame(
+        [
+            {"source": "PRODUCT:P1", "target": "TYPE:FRASCO", "weight": 0.95},
+            {"source": "PRODUCT:P1", "target": "COLOR:AMBAR", "weight": 0.95},
+            {"source": "PRODUCT:P1", "target": "CAPACITY:100ML", "weight": 0.95},
+            {"source": "PRODUCT:P2", "target": "TYPE:FRASCO", "weight": 0.90},
+            {"source": "PRODUCT:P2", "target": "COLOR:AMBAR", "weight": 0.90},
+            {"source": "PRODUCT:P2", "target": "CAPACITY:100ML", "weight": 0.90},
+        ]
+    )
+    return SemanticSearchIndex.from_frames(nodes, edges)
+
+
+def test_finalists_ordered_by_sales() -> None:
+    results = _index_with_sales().search("frasco ambar 100ml", k=10)
+
+    # Ambos cumplen todo; el más vendido (P2) va primero pese a menor score BFS.
+    assert [item["product"] for item in results] == ["PRODUCT:P2", "PRODUCT:P1"]
+    assert results[0]["units_sold"] == 42
+
+
+def test_limit_returns_top_sold_finalist() -> None:
+    results = _index_with_sales().search("frasco ambar 100ml", k=1)
+
+    assert [item["product"] for item in results] == ["PRODUCT:P2"]

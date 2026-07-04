@@ -102,15 +102,45 @@ def _prepare_attributes(attributes: pd.DataFrame) -> pd.DataFrame:
     return prepared
 
 
-def build_semantic_graph(attributes: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+def _sold_units_by_product(activity: pd.DataFrame | None) -> dict[str, float]:
+    """product_id -> unidades vendidas, desde el resumen de actividad de ventas.
+
+    Se usa para anotar cada nodo-producto de G_attr con su popularidad, de modo
+    que el buscador y el grafo interactivo ordenen finalistas por ventas sin
+    consultar nada extra.
+    """
+    if activity is None or activity.empty or "product_id" not in activity.columns:
+        return {}
+    col = "sold_units" if "sold_units" in activity.columns else None
+    if col is None:
+        return {}
+    sold: dict[str, float] = {}
+    for row in activity.itertuples(index=False):
+        pid = _stable(getattr(row, "product_id", ""))
+        if not pid:
+            continue
+        try:
+            sold[pid] = float(getattr(row, col, 0) or 0)
+        except (TypeError, ValueError):
+            sold[pid] = 0.0
+    return sold
+
+
+def build_semantic_graph(
+    attributes: pd.DataFrame, activity: pd.DataFrame | None = None
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """G_attr en capas: PRODUCT ↔ {TYPE, SUBTYPE, …, CAPACITY, MOUTH_SIZE}.
 
     Cada valor distinto de una capa es un nodo (TYPE:FRASCO, COLOR:AMBAR…).
     El peso de la arista es la confianza de extracción de ESE atributo; el
     filtro min_confidence se aplica por atributo (un atributo débil no descarta
     los fuertes del mismo producto).
+
+    `activity` (opcional, columnas product_id/sold_units) anota cada nodo-producto
+    con `units_sold` para ordenar finalistas por popularidad.
     """
     data = _prepare_attributes(attributes)
+    sold_units = _sold_units_by_product(activity)
     nodes: dict[str, dict[str, Any]] = {}
     edges = []
     for row in data.itertuples(index=False):
@@ -123,6 +153,7 @@ def build_semantic_graph(attributes: pd.DataFrame) -> tuple[pd.DataFrame, pd.Dat
             "node_type": "PRODUCT",
             "label": _stable(getattr(row, "product_name", "")),
             "ref": product_id,
+            "units_sold": sold_units.get(product_id, 0.0),
         }
 
         product_conf = 0.0

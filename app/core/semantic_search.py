@@ -67,11 +67,13 @@ class SemanticSearchIndex:
     node_type: dict[str, str] = field(default_factory=dict)
     label_to_nodes: dict[str, list[str]] = field(default_factory=dict)
     product_labels: dict[str, str] = field(default_factory=dict)
+    product_sales: dict[str, float] = field(default_factory=dict)
     last_stats: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_frames(cls, nodes: pd.DataFrame, edges: pd.DataFrame) -> "SemanticSearchIndex":
         index = cls()
+        has_sales = "units_sold" in nodes.columns
         for _, node in nodes.iterrows():
             nid = str(node["node_id"])
             ntype = str(node["node_type"])
@@ -79,6 +81,11 @@ class SemanticSearchIndex:
             label = normalize_text(node.get("label"))
             if ntype == "PRODUCT":
                 index.product_labels[nid] = str(node.get("label", ""))
+                if has_sales:
+                    try:
+                        index.product_sales[nid] = float(node.get("units_sold") or 0)
+                    except (TypeError, ValueError):
+                        index.product_sales[nid] = 0.0
             elif label:
                 index.label_to_nodes.setdefault(label, []).append(nid)
         for _, edge in edges.iterrows():
@@ -212,21 +219,27 @@ class SemanticSearchIndex:
             cov = coverage.get(product, 0)
             score[product] *= (cov / total_groups) ** 2 * 20 + 1
 
+        # Finalistas = productos que cumplen TODA la consulta (filtro estricto).
+        # BFS + cobertura ya hicieron de gate; el orden final es por VENTAS
+        # (popularidad) y el score de BFS solo desempata. Así `limit` devuelve
+        # los N más vendidos que cumplen la consulta.
+        finalists = [product for product in score if product in strict_allowed]
+        finalists.sort(
+            key=lambda product: (self.product_sales.get(product, 0.0), score[product]),
+            reverse=True,
+        )
         results = []
-        for product in sorted(score, key=score.get, reverse=True):
-            if product not in strict_allowed:
-                continue
+        for product in finalists[:k]:
             results.append(
                 {
                     "product": product,
                     "label": self.product_labels.get(product, ""),
                     "relevance": round(score[product], 2),
+                    "units_sold": round(self.product_sales.get(product, 0.0), 2),
                     "seed_coverage": coverage.get(product, 0),
                     "total_seeds": total_groups,
                 }
             )
-            if len(results) >= k:
-                break
 
         self.last_stats = {
             "seeds": seeds,
