@@ -16,7 +16,12 @@ from app.config import (
 from app.core.algorithms import bellman_ford_savings, build_supply_options, families_from_projection
 from app.core.attributes import extract_product_attributes
 from app.core.attribute_llm import gemini_available, refine_rules_with_gemini
-from app.core.graphs import build_product_projection, build_semantic_graph, build_transaction_graphs
+from app.core.graphs import (
+    build_product_projection,
+    build_semantic_graph,
+    build_supplier_projection,
+    build_transaction_graphs,
+)
 from app.core.io import read_table
 from app.core.normalization import normalize_all, profile_frames, quality_summary
 from app.domain.schemas import ArtifactStatus, DatasetSummary
@@ -164,6 +169,29 @@ def _build_dataset(dataset_id: str, raw: dict[str, pd.DataFrame]) -> DatasetSumm
                     f"transaction_graph_{name}_edges.csv",
                     f"transaction_graph_{name}_metrics.json",
                 ]
+            )
+        supplier_projection_edges, supplier_projection_metrics = build_supplier_projection(cleaned["purchases"])
+        if len(supplier_projection_edges) >= MIN_GRAPH_EDGES:
+            write_csv(dataset_id, "supplier_projection_edges.csv", supplier_projection_edges)
+            write_json(dataset_id, "supplier_projection_metrics.json", supplier_projection_metrics)
+            supplier_families = families_from_projection(supplier_projection_edges).rename(
+                columns={"product_id": "supplier_id", "product_name": "supplier_name"}
+            )
+            write_csv(dataset_id, "ufds_supplier_families.csv", supplier_families)
+            generated.extend(
+                ArtifactStatus(name=name, kind="graph")
+                for name in [
+                    "supplier_projection_edges.csv",
+                    "supplier_projection_metrics.json",
+                    "ufds_supplier_families.csv",
+                ]
+            )
+        else:
+            omitted.append(
+                ArtifactStatus(
+                    name="G_supplier_projection", kind="graph", generated=False,
+                    reason="La similitud entre proveedores no genero suficientes aristas.",
+                )
             )
     else:
         omitted.append(ArtifactStatus(name="transaction_graphs", kind="graph", generated=False, reason="Ventas o compras no alcanzan filas minimas."))

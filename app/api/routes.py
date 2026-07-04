@@ -134,6 +134,11 @@ def product_substitutes(dataset_id: str, product_id: str) -> QueryResponse:
     return _query(lambda: queries.product_substitutes(dataset_id, product_id))
 
 
+@router.get("/datasets/{dataset_id}/suppliers/{supplier_id}/substitutes", response_model=QueryResponse)
+def supplier_substitutes(dataset_id: str, supplier_id: str) -> QueryResponse:
+    return _query(lambda: queries.supplier_substitutes(dataset_id, supplier_id))
+
+
 @router.post("/datasets/{dataset_id}/budget/optimize", response_model=QueryResponse)
 def budget_optimize(dataset_id: str, body: BudgetRequest) -> QueryResponse:
     items = [item.model_dump() for item in body.items]

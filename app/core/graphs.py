@@ -228,6 +228,53 @@ def build_product_projection(attributes: pd.DataFrame) -> tuple[pd.DataFrame, di
     return frame, {"graph_name": "G_projection", "edge_count": int(len(frame)), "product_count": len(product_attrs)}
 
 
+def build_supplier_projection(purchases: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """Similitud proveedor-proveedor: Jaccard sobre el catalogo de productos que cada uno vende.
+
+    A diferencia de G_projection (productos, que mezcla atributos duros y blandos),
+    aqui la similitud es un solo criterio sin ambiguedad: cuanto catalogo comparten
+    dos proveedores. Sirve para "si este proveedor falla, quien mas cubre lo mismo".
+    """
+    if purchases.empty:
+        return pd.DataFrame(), {"graph_name": "G_supplier_projection", "edge_count": 0, "supplier_count": 0}
+
+    supplier_products: dict[str, set[str]] = {}
+    names: dict[str, str] = {}
+    for entity_norm, group in purchases.groupby("entity_norm"):
+        supplier_id = _stable(entity_norm)
+        if not supplier_id:
+            continue
+        supplier_products[supplier_id] = {
+            _stable(product_id) for product_id in group["product_id"] if _stable(product_id)
+        }
+        names[supplier_id] = _stable(group["entity_name"].iloc[0])
+
+    rows = []
+    for left, right in combinations(supplier_products, 2):
+        union = supplier_products[left] | supplier_products[right]
+        if not union:
+            continue
+        shared = supplier_products[left] & supplier_products[right]
+        score = len(shared) / len(union)
+        if score >= 0.28:
+            rows.append(
+                {
+                    "source": left,
+                    "target": right,
+                    "source_name": names[left],
+                    "target_name": names[right],
+                    "shared_attributes": len(shared),
+                    "similarity": round(score, 4),
+                }
+            )
+    frame = pd.DataFrame(rows).sort_values("similarity", ascending=False) if rows else pd.DataFrame()
+    return frame, {
+        "graph_name": "G_supplier_projection",
+        "edge_count": int(len(frame)),
+        "supplier_count": len(supplier_products),
+    }
+
+
 def build_transaction_graphs(
     sales: pd.DataFrame, purchases: pd.DataFrame
 ) -> dict[str, tuple[pd.DataFrame, pd.DataFrame, dict]]:
@@ -236,30 +283,6 @@ def build_transaction_graphs(
         "purchases": _transaction_graph(purchases, "SUPPLIER", "PURCHASE"),
         "business": _business_graph(sales, purchases),
     }
-
-
-def bfs_from_seeds(
-    edges: pd.DataFrame,
-    seed_nodes: list[str],
-    target_type_prefix: str,
-    max_depth: int = 2,
-) -> dict[str, int]:
-    """BFS desde nodos semilla; devuelve {node_id: profundidad} para nodos del tipo buscado."""
-    adjacency = _adjacency(edges)
-    result: dict[str, int] = {}
-    visited = set(seed_nodes)
-    queue: deque[tuple[str, int]] = deque((node, 0) for node in seed_nodes)
-    while queue:
-        node, depth = queue.popleft()
-        if node.startswith(target_type_prefix) and node not in seed_nodes:
-            result[node] = depth
-        if depth >= max_depth:
-            continue
-        for neighbor in adjacency.get(node, set()):
-            if neighbor not in visited:
-                visited.add(neighbor)
-                queue.append((neighbor, depth + 1))
-    return result
 
 
 def dijkstra_max_weight_path(edges: pd.DataFrame, start: str, goal: str, weight_col: str = "amount") -> tuple[list[str], float]:
@@ -401,11 +424,25 @@ def _business_graph(sales: pd.DataFrame, purchases: pd.DataFrame) -> tuple[pd.Da
     return nodes, edges, _metrics(nodes, edges, "G_business")
 
 
+def _unique_edge_count(edges: pd.DataFrame) -> int:
+    # El grafo real (visualizacion + BFS/Dijkstra/_adjacency) es simple y no
+    # dirigido: pares repetidos (mismo cliente/producto en varias facturas)
+    # colapsan a una sola arista. Contar filas crudas del CSV de transacciones
+    # infla el numero frente a lo que realmente se recorre y se dibuja.
+    if edges.empty:
+        return 0
+    pairs = {
+        (s, t) if s <= t else (t, s)
+        for s, t in zip(edges["source"].astype(str), edges["target"].astype(str))
+    }
+    return len(pairs)
+
+
 def _metrics(nodes: pd.DataFrame, edges: pd.DataFrame, name: str) -> dict:
     return {
         "graph_name": name,
         "node_count": int(len(nodes)),
-        "edge_count": int(len(edges)),
+        "edge_count": _unique_edge_count(edges),
         "node_type_counts": nodes["node_type"].value_counts().to_dict() if not nodes.empty else {},
     }
 

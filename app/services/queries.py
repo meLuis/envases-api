@@ -296,6 +296,34 @@ def product_substitutes(dataset_id: str, product_id: str) -> QueryResponse:
     )
 
 
+def supplier_substitutes(dataset_id: str, supplier_id: str) -> QueryResponse:
+    families = read_csv(dataset_id, "ufds_supplier_families.csv")
+    supplier_rows = families.loc[families["supplier_id"].astype(str) == str(supplier_id)]
+    if supplier_rows.empty:
+        return QueryResponse(ok=False, error="Proveedor no pertenece a una familia UFDS generada.", algorithm="UFDS / componentes conexos")
+    family_id = supplier_rows.iloc[0]["family_id"]
+    projection = read_csv(dataset_id, "supplier_projection_edges.csv")
+    projection["similarity"] = pd.to_numeric(projection["similarity"], errors="coerce").fillna(0)
+    left = projection.loc[projection["source"].astype(str) == str(supplier_id)].rename(
+        columns={"target": "supplier_id", "target_name": "supplier_name"}
+    )
+    right = projection.loc[projection["target"].astype(str) == str(supplier_id)].rename(
+        columns={"source": "supplier_id", "source_name": "supplier_name"}
+    )
+    related = (
+        pd.concat([left, right], ignore_index=True)[["supplier_id", "supplier_name", "shared_attributes", "similarity"]]
+        .sort_values(["similarity", "shared_attributes"], ascending=False)
+        .head(20)
+    )
+    return QueryResponse(
+        answer=f"Proveedor ubicado en familia {family_id}; se devuelven los vecinos directos con mas catalogo compartido como respaldo candidato.",
+        algorithm="UFDS / componentes conexos + ranking directo en G_supplier_projection",
+        table=_records(related.head(20)),
+        metrics={"family_id": family_id, "family_size": int(supplier_rows.iloc[0]["family_size"])},
+        evidence={"dataset_id": dataset_id, "artifacts": ["ufds_supplier_families.csv", "supplier_projection_edges.csv"], "graph": "G_supplier_projection"},
+    )
+
+
 def optimize_budget(dataset_id: str, budget: float, items: list[dict]) -> QueryResponse:
     try:
         options = read_csv(dataset_id, "supply_options.csv")
@@ -361,6 +389,14 @@ def graph_summary(dataset_id: str) -> dict:
     try:
         proj = read_json(dataset_id, "product_projection_metrics.json")
         result["by_graph"]["G_projection"] = {"nodes": proj.get("product_count", 0), "edges": proj.get("edge_count", 0)}
+    except FileNotFoundError:
+        pass
+    try:
+        supplier_proj = read_json(dataset_id, "supplier_projection_metrics.json")
+        result["by_graph"]["G_supplier_projection"] = {
+            "nodes": supplier_proj.get("supplier_count", 0),
+            "edges": supplier_proj.get("edge_count", 0),
+        }
     except FileNotFoundError:
         pass
     result["node_type_breakdown"] = type_counts
