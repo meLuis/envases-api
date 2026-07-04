@@ -273,44 +273,64 @@ def full_attribute_layout(graph) -> dict[str, tuple[float, float]]:
 
 
 def draw_full_attribute_graph(graph, output_path, mpatches, plt, nx) -> str:
-    # Circular: capas de atributos (agrupadas por capa) en el aro interno y los
-    # productos en el aro exterior.
-    pos = concentric_layout(_rings_by_count(graph, [list(LAYER_ORDER), ["PRODUCT"]]))
-    fig, ax = plt.subplots(figsize=(24, 24), dpi=180)
+    # Por capas: una columna por dimension del producto (TYPE, SUBTYPE, ...) mas
+    # una columna de PRODUCT, con carriles (lanes) para no perder nodos cuando
+    # una capa tiene cientos de miembros. Incluye TODOS los nodos del grafo.
+    pos = full_attribute_layout(graph)
+    fig, ax = plt.subplots(figsize=(28, 16), dpi=160)
     fig.patch.set_facecolor("#0b1020")
     ax.set_facecolor("#0b1020")
 
-    nx.draw_networkx_edges(graph, pos, ax=ax, edge_color="#64748b", alpha=0.18, width=0.28)
+    nx.draw_networkx_edges(graph, pos, ax=ax, edge_color="#64748b", alpha=0.12, width=0.22)
 
     for node_type, color in NODE_COLORS.items():
         nodes = [node for node, data in graph.nodes(data=True) if data.get("node_type") == node_type]
         if not nodes:
             continue
         if node_type == "PRODUCT":
-            sizes = [12 + min(graph.degree(node), 18) * 0.7 for node in nodes]
+            sizes = [10 + min(graph.degree(node), 18) * 0.6 for node in nodes]
             edge_color = "#94a3b8"
-            alpha = 0.62
+            alpha = 0.55
         else:
-            sizes = [70 + min(graph.degree(node), 80) * 2.6 for node in nodes]
+            sizes = [55 + min(graph.degree(node), 80) * 2.0 for node in nodes]
             edge_color = "#f8fafc"
             alpha = 0.94
         nx.draw_networkx_nodes(
             graph, pos, nodelist=nodes, node_color=color, node_size=sizes,
-            edgecolors=edge_color, linewidths=0.35, alpha=alpha, ax=ax,
+            edgecolors=edge_color, linewidths=0.3, alpha=alpha, ax=ax,
         )
 
     label_candidates = [
         node for node, data in graph.nodes(data=True)
         if data.get("node_type") != "PRODUCT"
     ]
-    label_nodes = sorted(label_candidates, key=lambda node: graph.degree(node), reverse=True)[:120]
-    labels = {node: str(graph.nodes[node].get("label", node))[:20] for node in label_nodes}
+    label_nodes = sorted(label_candidates, key=lambda node: graph.degree(node), reverse=True)[:140]
+    labels = {node: str(graph.nodes[node].get("label", node))[:18] for node in label_nodes}
+
+    # Un par de productos de muestra con etiqueta, solo para que se entienda
+    # que esa columna gris son productos (el resto queda sin texto por volumen).
+    product_nodes = [n for n, d in graph.nodes(data=True) if d.get("node_type") == "PRODUCT"]
+    sample_products = sorted(product_nodes, key=lambda node: graph.degree(node), reverse=True)[:2]
+    for node in sample_products:
+        labels[node] = str(graph.nodes[node].get("label", node))[:18]
+
     nx.draw_networkx_labels(graph, pos, labels=labels, font_size=5.5, font_color="#f8fafc", font_weight="bold", ax=ax)
 
-    ax.set_aspect("equal")
+    column_order = ["PRODUCT"] + LAYER_ORDER
+    column_x = {"PRODUCT": -2.2}
+    column_x.update({node_type: index * 2.4 for index, node_type in enumerate(LAYER_ORDER)})
+    top_y = max((y for _, y in pos.values()), default=0.0) + 1.0
+    for node_type in column_order:
+        if not any(data.get("node_type") == node_type for _, data in graph.nodes(data=True)):
+            continue
+        ax.text(
+            column_x[node_type], top_y, node_type.replace("_", " ").lower(),
+            color=NODE_COLORS[node_type], fontsize=11, fontweight="bold", ha="center",
+        )
+
     ax.set_title(
-        f"G_attr - grafo completo ({graph.number_of_nodes()} nodos, {graph.number_of_edges()} aristas)",
-        color="#f8fafc", fontsize=16, fontweight="bold", loc="left", pad=18,
+        f"G_attr - grafo completo por capas ({graph.number_of_nodes()} nodos, {graph.number_of_edges()} aristas)",
+        color="#f8fafc", fontsize=16, fontweight="bold", loc="left", pad=24,
     )
     legend = [
         mpatches.Patch(color=color, label=node_type)
