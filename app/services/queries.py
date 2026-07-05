@@ -268,60 +268,128 @@ def client_supplier_path(dataset_id: str, client: str, supplier: str) -> QueryRe
     )
 
 
-def product_substitutes(dataset_id: str, product_id: str) -> QueryResponse:
-    families = read_csv(dataset_id, "ufds_product_families.csv")
-    product_rows = families.loc[families["product_id"].astype(str) == str(product_id)]
-    if product_rows.empty:
-        return QueryResponse(ok=False, error="Producto no pertenece a una familia UFDS generada.", algorithm="UFDS / componentes conexos")
-    family_id = product_rows.iloc[0]["family_id"]
-    projection = read_csv(dataset_id, "product_projection_edges.csv")
-    projection["similarity"] = pd.to_numeric(projection["similarity"], errors="coerce").fillna(0)
-    left = projection.loc[projection["source"].astype(str) == str(product_id)].rename(
-        columns={"target": "product_id", "target_name": "product_name"}
-    )
-    right = projection.loc[projection["target"].astype(str) == str(product_id)].rename(
-        columns={"source": "product_id", "source_name": "product_name"}
-    )
-    related = (
-        pd.concat([left, right], ignore_index=True)[["product_id", "product_name", "shared_attributes", "similarity"]]
-        .sort_values(["similarity", "shared_attributes"], ascending=False)
-        .head(20)
-    )
-    return QueryResponse(
-        answer=f"Producto ubicado en familia {family_id}; se devuelven los vecinos directos mas similares como sustitutos candidatos.",
-        algorithm="UFDS / componentes conexos + ranking directo en G_projection",
-        table=_records(related.head(20)),
-        metrics={"family_id": family_id, "family_size": int(product_rows.iloc[0]["family_size"])},
-        evidence={"dataset_id": dataset_id, "artifacts": ["ufds_product_families.csv", "product_projection_edges.csv"], "graph": "G_projection"},
-    )
-
-
 def supplier_substitutes(dataset_id: str, supplier_id: str) -> QueryResponse:
     families = read_csv(dataset_id, "ufds_supplier_families.csv")
-    supplier_rows = families.loc[families["supplier_id"].astype(str) == str(supplier_id)]
+    projection = read_csv(dataset_id, "supplier_projection_edges.csv")
+    matched = _resolve_supplier_id(supplier_id, families, projection)
+    if matched is None:
+        suggestions = _supplier_suggestions(supplier_id, families, projection)
+        return QueryResponse(
+            ok=False,
+            error=(
+                f"No se encontro un proveedor parecido a '{supplier_id}'. "
+                f"Prueba con: {', '.join(suggestions[:5])}."
+            ),
+            algorithm="UFDS / componentes conexos sobre proveedores",
+            metrics={"suggestions": suggestions[:5]},
+        )
+
+    supplier_rows = families.loc[families["supplier_id"].astype(str) == matched["supplier_id"]]
     if supplier_rows.empty:
         return QueryResponse(ok=False, error="Proveedor no pertenece a una familia UFDS generada.", algorithm="UFDS / componentes conexos")
     family_id = supplier_rows.iloc[0]["family_id"]
-    projection = read_csv(dataset_id, "supplier_projection_edges.csv")
     projection["similarity"] = pd.to_numeric(projection["similarity"], errors="coerce").fillna(0)
-    left = projection.loc[projection["source"].astype(str) == str(supplier_id)].rename(
+    for col in ["shared_products", "shared_attributes", "source_coverage", "target_coverage"]:
+        if col in projection.columns:
+            projection[col] = pd.to_numeric(projection[col], errors="coerce").fillna(0)
+    supplier_key = str(matched["supplier_id"])
+    left = projection.loc[projection["source"].astype(str) == supplier_key].rename(
         columns={"target": "supplier_id", "target_name": "supplier_name"}
     )
-    right = projection.loc[projection["target"].astype(str) == str(supplier_id)].rename(
+    if not left.empty:
+        left["coverage_of_query_catalog"] = left.get("source_coverage", 0)
+        left["coverage_of_candidate_catalog"] = left.get("target_coverage", 0)
+    right = projection.loc[projection["target"].astype(str) == supplier_key].rename(
         columns={"source": "supplier_id", "source_name": "supplier_name"}
     )
+    if not right.empty:
+        right["coverage_of_query_catalog"] = right.get("target_coverage", 0)
+        right["coverage_of_candidate_catalog"] = right.get("source_coverage", 0)
+    shared_col = "shared_products" if "shared_products" in projection.columns else "shared_attributes"
     related = (
-        pd.concat([left, right], ignore_index=True)[["supplier_id", "supplier_name", "shared_attributes", "similarity"]]
-        .sort_values(["similarity", "shared_attributes"], ascending=False)
+        pd.concat([left, right], ignore_index=True)[
+            ["supplier_id", "supplier_name", shared_col, "coverage_of_query_catalog", "coverage_of_candidate_catalog", "similarity"]
+        ]
+        .rename(columns={shared_col: "shared_products"})
+        .sort_values(["similarity", "shared_products"], ascending=False)
         .head(20)
     )
     return QueryResponse(
-        answer=f"Proveedor ubicado en familia {family_id}; se devuelven los vecinos directos con mas catalogo compartido como respaldo candidato.",
-        algorithm="UFDS / componentes conexos + ranking directo en G_supplier_projection",
+        answer=(
+            f"Proveedor '{matched['supplier_name']}' ubicado en familia {family_id}; "
+            "se devuelven respaldos directos con catalogo compartido."
+        ),
+        algorithm="UFDS sobre proveedores: Jaccard de catalogo comprado + ranking por respaldo directo",
         table=_records(related.head(20)),
-        metrics={"family_id": family_id, "family_size": int(supplier_rows.iloc[0]["family_size"])},
+        metrics={
+            "input_supplier": supplier_id,
+            "matched_supplier_id": matched["supplier_id"],
+            "matched_supplier_name": matched["supplier_name"],
+            "match_score": matched["score"],
+            "family_id": family_id,
+            "family_size": int(supplier_rows.iloc[0]["family_size"]),
+        },
         evidence={"dataset_id": dataset_id, "artifacts": ["ufds_supplier_families.csv", "supplier_projection_edges.csv"], "graph": "G_supplier_projection"},
     )
+
+
+def _resolve_supplier_id(query: str, families: pd.DataFrame, projection: pd.DataFrame) -> dict[str, Any] | None:
+    candidates = _supplier_candidates(families, projection)
+    q = normalize_text(query)
+    if not q:
+        return None
+
+    scored = []
+    for item in candidates:
+        supplier_id = str(item["supplier_id"])
+        supplier_name = str(item["supplier_name"])
+        id_norm = normalize_text(supplier_id)
+        name_norm = normalize_text(supplier_name)
+        text_score = max(similarity(q, id_norm), similarity(q, name_norm))
+        if q == id_norm or q == name_norm:
+            score = 1.0
+        elif q in id_norm or q in name_norm:
+            score = 0.92
+        else:
+            score = text_score
+        scored.append({**item, "score": round(float(score), 4)})
+
+    best = max(scored, key=lambda item: item["score"], default=None)
+    if best is None or best["score"] < 0.5:
+        return None
+    return best
+
+
+def _supplier_suggestions(query: str, families: pd.DataFrame, projection: pd.DataFrame) -> list[str]:
+    candidates = _supplier_candidates(families, projection)
+    q = normalize_text(query)
+    ranked = sorted(
+        candidates,
+        key=lambda item: max(
+            similarity(q, normalize_text(item["supplier_id"])),
+            similarity(q, normalize_text(item["supplier_name"])),
+        ),
+        reverse=True,
+    )
+    return [str(item["supplier_name"] or item["supplier_id"]) for item in ranked[:5]]
+
+
+def _supplier_candidates(families: pd.DataFrame, projection: pd.DataFrame) -> list[dict[str, str]]:
+    rows: dict[str, str] = {}
+    if not families.empty:
+        for row in families.itertuples(index=False):
+            supplier_id = str(getattr(row, "supplier_id", "") or "")
+            if supplier_id:
+                rows[supplier_id] = str(getattr(row, "supplier_name", "") or supplier_id)
+    if not projection.empty:
+        for row in projection.itertuples(index=False):
+            source = str(getattr(row, "source", "") or "")
+            target = str(getattr(row, "target", "") or "")
+            if source:
+                rows.setdefault(source, str(getattr(row, "source_name", "") or source))
+            if target:
+                rows.setdefault(target, str(getattr(row, "target_name", "") or target))
+    return [{"supplier_id": supplier_id, "supplier_name": name} for supplier_id, name in rows.items()]
 
 
 def optimize_budget(dataset_id: str, budget: float, items: list[dict]) -> QueryResponse:
@@ -386,11 +454,6 @@ def graph_summary(dataset_id: str) -> dict:
                 type_counts[node_type] = max(type_counts.get(node_type, 0), count)
         except FileNotFoundError:
             result["by_graph"][graph_name] = {"nodes": 0, "edges": 0, "available": False}
-    try:
-        proj = read_json(dataset_id, "product_projection_metrics.json")
-        result["by_graph"]["G_projection"] = {"nodes": proj.get("product_count", 0), "edges": proj.get("edge_count", 0)}
-    except FileNotFoundError:
-        pass
     try:
         supplier_proj = read_json(dataset_id, "supplier_projection_metrics.json")
         result["by_graph"]["G_supplier_projection"] = {

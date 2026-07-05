@@ -503,42 +503,6 @@ def transaction_layout(graph, nx) -> dict[str, tuple[float, float]]:
     return pos
 
 
-def transaction_full_layout(graph) -> dict[str, tuple[float, float]]:
-    """Layout completo por tipo: conserva todos los nodos sin costo de force layout."""
-    by_type: dict[str, list[str]] = {}
-    for node, data in graph.nodes(data=True):
-        by_type.setdefault(data.get("node_type", "OTHER"), []).append(node)
-
-    x_by_type = {
-        "CLIENT": -4.4,
-        "SUPPLIER": -3.2,
-        "DOCUMENT": 0.0,
-        "PRODUCT": 4.0,
-        "OTHER": 1.8,
-    }
-    rows_by_type = {
-        "CLIENT": 72,
-        "SUPPLIER": 72,
-        "DOCUMENT": 96,
-        "PRODUCT": 86,
-        "OTHER": 80,
-    }
-    pos: dict[str, tuple[float, float]] = {}
-    for node_type in ["CLIENT", "SUPPLIER", "DOCUMENT", "PRODUCT", "OTHER"]:
-        nodes = sorted(by_type.get(node_type, []), key=lambda node: graph.degree(node), reverse=True)
-        if not nodes:
-            continue
-        rows_per_lane = rows_by_type[node_type]
-        lane_count = max(1, math.ceil(len(nodes) / rows_per_lane))
-        for index, node in enumerate(nodes):
-            lane = index // rows_per_lane
-            row = index % rows_per_lane
-            lane_offset = (lane - (lane_count - 1) / 2) * 0.15
-            y = ((rows_per_lane - 1) / 2 - row) * 0.14
-            pos[node] = (x_by_type[node_type] + lane_offset, y)
-    return pos
-
-
 def concentric_layout(rings: list[list[str]]) -> dict[str, tuple[float, float]]:
     """Coloca cada anillo (lista de nodos, de adentro hacia afuera) en un círculo.
 

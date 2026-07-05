@@ -129,11 +129,6 @@ def weighted_path(dataset_id: str, source: str, target: str) -> QueryResponse:
     return _query(lambda: queries.weighted_connection(dataset_id, source, target))
 
 
-@router.get("/datasets/{dataset_id}/products/{product_id}/substitutes", response_model=QueryResponse)
-def product_substitutes(dataset_id: str, product_id: str) -> QueryResponse:
-    return _query(lambda: queries.product_substitutes(dataset_id, product_id))
-
-
 @router.get("/datasets/{dataset_id}/suppliers/{supplier_id}/substitutes", response_model=QueryResponse)
 def supplier_substitutes(dataset_id: str, supplier_id: str) -> QueryResponse:
     return _query(lambda: queries.supplier_substitutes(dataset_id, supplier_id))

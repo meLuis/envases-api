@@ -11,13 +11,13 @@ from app.config import (
     MIN_ATTRIBUTE_COVERAGE,
     MIN_GRAPH_EDGES,
     MIN_PRODUCT_ROWS,
+    MIN_SUPPLIER_UFDS_SIMILARITY,
     MIN_TRANSACTION_ROWS,
 )
 from app.core.algorithms import bellman_ford_savings, build_supply_options, families_from_projection
 from app.core.attributes import extract_product_attributes
 from app.core.attribute_llm import gemini_available, refine_rules_with_gemini
 from app.core.graphs import (
-    build_product_projection,
     build_semantic_graph,
     build_supplier_projection,
     build_transaction_graphs,
@@ -120,7 +120,6 @@ def _build_dataset(dataset_id: str, raw: dict[str, pd.DataFrame]) -> DatasetSumm
             ]
         )
         semantic_nodes, semantic_edges, semantic_metrics = build_semantic_graph(attributes, activity=product_activity)
-        projection_edges, projection_metrics = build_product_projection(attributes)
         if len(semantic_edges) >= MIN_GRAPH_EDGES:
             write_csv(dataset_id, "semantic_attribute_graph_nodes.csv", semantic_nodes)
             write_csv(dataset_id, "semantic_attribute_graph_edges.csv", semantic_edges)
@@ -135,24 +134,6 @@ def _build_dataset(dataset_id: str, raw: dict[str, pd.DataFrame]) -> DatasetSumm
             )
         else:
             omitted.append(ArtifactStatus(name="G_attr", kind="graph", generated=False, reason="Menos aristas que el minimo configurado."))
-        if len(projection_edges) >= MIN_GRAPH_EDGES:
-            write_csv(dataset_id, "product_projection_edges.csv", projection_edges)
-            write_json(dataset_id, "product_projection_metrics.json", projection_metrics)
-            top = projection_edges.head(100) if not projection_edges.empty else projection_edges
-            write_csv(dataset_id, "product_projection_top_similar.csv", top)
-            families = families_from_projection(projection_edges)
-            write_csv(dataset_id, "ufds_product_families.csv", families)
-            generated.extend(
-                ArtifactStatus(name=name, kind="graph")
-                for name in [
-                    "product_projection_edges.csv",
-                    "product_projection_metrics.json",
-                    "product_projection_top_similar.csv",
-                    "ufds_product_families.csv",
-                ]
-            )
-        else:
-            omitted.append(ArtifactStatus(name="G_projection", kind="graph", generated=False, reason="La similitud entre productos no genero suficientes aristas."))
     else:
         omitted.append(ArtifactStatus(name="semantic_outputs", kind="semantic", generated=False, reason="La cobertura de atributos no alcanzo el minimo."))
 
@@ -171,10 +152,13 @@ def _build_dataset(dataset_id: str, raw: dict[str, pd.DataFrame]) -> DatasetSumm
                 ]
             )
         supplier_projection_edges, supplier_projection_metrics = build_supplier_projection(cleaned["purchases"])
-        if len(supplier_projection_edges) >= MIN_GRAPH_EDGES:
+        if not supplier_projection_edges.empty:
             write_csv(dataset_id, "supplier_projection_edges.csv", supplier_projection_edges)
             write_json(dataset_id, "supplier_projection_metrics.json", supplier_projection_metrics)
-            supplier_families = families_from_projection(supplier_projection_edges).rename(
+            supplier_families = families_from_projection(
+                supplier_projection_edges,
+                min_similarity=MIN_SUPPLIER_UFDS_SIMILARITY,
+            ).rename(
                 columns={"product_id": "supplier_id", "product_name": "supplier_name"}
             )
             write_csv(dataset_id, "ufds_supplier_families.csv", supplier_families)

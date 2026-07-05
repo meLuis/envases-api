@@ -8,6 +8,7 @@ from typing import Any
 
 import pandas as pd
 
+from app.config import MIN_SUPPLIER_PROJECTION_SIMILARITY, MIN_SUPPLIER_SHARED_PRODUCTS
 from app.core.text import normalize_text
 
 
@@ -191,49 +192,12 @@ def build_semantic_graph(
     return node_df, edge_df, _metrics(node_df, edge_df, "G_attr")
 
 
-def build_product_projection(attributes: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    data = _prepare_attributes(attributes)
-    attr_cols = [column for column, _type, _rel in ATTRIBUTE_SPECS]
-    product_attrs: dict[str, set[str]] = {}
-    names: dict[str, str] = {}
-    for row in data.itertuples(index=False):
-        product_id = _stable(getattr(row, "product_id", ""))
-        if not product_id:
-            continue
-        values = set()
-        for col in attr_cols:
-            for value in _split_values(getattr(row, col, "")):
-                values.add(f"{col}:{value}")
-        product_attrs[product_id] = values
-        names[product_id] = _stable(getattr(row, "product_name", ""))
-    rows = []
-    for left, right in combinations(product_attrs, 2):
-        union = product_attrs[left] | product_attrs[right]
-        if not union:
-            continue
-        shared = product_attrs[left] & product_attrs[right]
-        score = len(shared) / len(union)
-        if score >= 0.28:
-            rows.append(
-                {
-                    "source": left,
-                    "target": right,
-                    "source_name": names[left],
-                    "target_name": names[right],
-                    "shared_attributes": len(shared),
-                    "similarity": round(score, 4),
-                }
-            )
-    frame = pd.DataFrame(rows).sort_values("similarity", ascending=False) if rows else pd.DataFrame()
-    return frame, {"graph_name": "G_projection", "edge_count": int(len(frame)), "product_count": len(product_attrs)}
-
-
 def build_supplier_projection(purchases: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     """Similitud proveedor-proveedor: Jaccard sobre el catalogo de productos que cada uno vende.
 
-    A diferencia de G_projection (productos, que mezcla atributos duros y blandos),
-    aqui la similitud es un solo criterio sin ambiguedad: cuanto catalogo comparten
-    dos proveedores. Sirve para "si este proveedor falla, quien mas cubre lo mismo".
+    La similitud es un criterio operativo: cuanto catalogo real de compras
+    comparten dos proveedores. Sirve para "si este proveedor falla, quien mas
+    cubre lo mismo".
     """
     if purchases.empty:
         return pd.DataFrame(), {"graph_name": "G_supplier_projection", "edge_count": 0, "supplier_count": 0}
@@ -256,14 +220,20 @@ def build_supplier_projection(purchases: pd.DataFrame) -> tuple[pd.DataFrame, di
             continue
         shared = supplier_products[left] & supplier_products[right]
         score = len(shared) / len(union)
-        if score >= 0.28:
+        if score >= MIN_SUPPLIER_PROJECTION_SIMILARITY and len(shared) >= MIN_SUPPLIER_SHARED_PRODUCTS:
+            left_count = len(supplier_products[left])
+            right_count = len(supplier_products[right])
             rows.append(
                 {
                     "source": left,
                     "target": right,
                     "source_name": names[left],
                     "target_name": names[right],
-                    "shared_attributes": len(shared),
+                    "shared_products": len(shared),
+                    "source_product_count": left_count,
+                    "target_product_count": right_count,
+                    "source_coverage": round(len(shared) / left_count, 4) if left_count else 0,
+                    "target_coverage": round(len(shared) / right_count, 4) if right_count else 0,
                     "similarity": round(score, 4),
                 }
             )
