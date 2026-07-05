@@ -4,7 +4,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from app.config import ENABLE_GRAPH_IMAGES
-from app.domain.schemas import BudgetRequest, PurchaseOptimizeRequest, QueryResponse
+from app.domain.schemas import BudgetRequest, QueryResponse
 from app.services import queries
 from app.services.pipeline import PipelineError, build_dataset_from_uploads
 from app.storage.repository import list_artifact_files, require_dataset_dir, list_all_datasets, delete_dataset
@@ -125,8 +125,18 @@ def client_to_supplier(dataset_id: str, client: str, supplier: str) -> QueryResp
 
 
 @router.get("/datasets/{dataset_id}/paths/weighted", response_model=QueryResponse)
-def weighted_path(dataset_id: str, source: str, target: str) -> QueryResponse:
-    return _query(lambda: queries.weighted_connection(dataset_id, source, target))
+def weighted_path(dataset_id: str, source: str, target: str, graph_type: str = "business") -> QueryResponse:
+    return _query(lambda: queries.weighted_connection(dataset_id, source, target, graph_type))
+
+
+@router.get("/datasets/{dataset_id}/mst", response_model=QueryResponse)
+def mst(dataset_id: str, graph_type: str = "business", limit: int = 60) -> QueryResponse:
+    return _query(lambda: queries.mst_kruskal(dataset_id, graph_type, limit))
+
+
+@router.get("/datasets/{dataset_id}/components", response_model=QueryResponse)
+def components(dataset_id: str, graph_type: str = "business", limit: int = 20) -> QueryResponse:
+    return _query(lambda: queries.graph_components(dataset_id, graph_type, limit))
 
 
 @router.get("/datasets/{dataset_id}/suppliers/{supplier_id}/substitutes", response_model=QueryResponse)
@@ -145,76 +155,19 @@ def offers(dataset_id: str, limit: int = 20) -> QueryResponse:
     return _query(lambda: queries.best_savings(dataset_id, limit))
 
 
-@router.post("/datasets/{dataset_id}/purchase/optimize", response_model=QueryResponse)
-def purchase_optimize(dataset_id: str, body: PurchaseOptimizeRequest) -> QueryResponse:
-    items = [item.model_dump() for item in body.items]
-    return _query(lambda: queries.optimize_purchase(dataset_id, items))
-
-
-@router.get("/datasets/{dataset_id}/supply-chain/risk", response_model=QueryResponse)
-def supplier_risk(dataset_id: str) -> QueryResponse:
-    return _query(lambda: queries.supplier_risk(dataset_id))
-
-
 @router.get("/datasets/{dataset_id}/products/{product_id}/cross-sell", response_model=QueryResponse)
 def cross_sell(dataset_id: str, product_id: str, limit: int = 10) -> QueryResponse:
     return _query(lambda: queries.cross_sell(dataset_id, product_id, limit))
 
 
-# ============================================================================
-# ENDPOINTS DE ANALISIS DOCUMENTALES (5 algoritmos + recomendación)
-# ============================================================================
-
 @router.get("/datasets/{dataset_id}/products/{product_id}/co-occurrence", response_model=QueryResponse)
 def product_co_occurrence(dataset_id: str, product_id: str, graph_type: str = "sales", limit: int = 15) -> QueryResponse:
     """
-    RECOMENDACIÓN: Market Basket Analysis.
-    Qué productos aparecen en el MISMO DOCUMENTO que uno dado.
+    Market Basket Analysis: qué productos aparecen en el MISMO DOCUMENTO que uno dado.
     Diferencia con cross-sell: cross-sell es histórico (cliente compró A y B en cualquier momento).
     Co-occurrence es operativo (A y B estaban en la misma factura/comprobante).
     """
     return _query(lambda: queries.product_co_occurrence(dataset_id, product_id, graph_type, limit))
-
-
-@router.get("/datasets/{dataset_id}/products/{product_id}/volatility", response_model=QueryResponse)
-def product_volatility(dataset_id: str, product_id: str, graph_type: str = "sales") -> QueryResponse:
-    """
-    PUNTO 2: Volatilidad de co-compra.
-    ¿Un producto siempre aparece con los mismos otros, o varía? (Jaccard similarity).
-    Alta volatilidad = versátil. Baja volatilidad = dependiente de ciertos productos.
-    """
-    return _query(lambda: queries.product_volatility(dataset_id, product_id, graph_type))
-
-
-@router.get("/datasets/{dataset_id}/documents/logistics-efficiency", response_model=QueryResponse)
-def document_logistics_efficiency(dataset_id: str, graph_type: str = "sales") -> QueryResponse:
-    """
-    PUNTO 3: Eficiencia logística.
-    Patrones de documentos: distribución de cuántos productos van por documento,
-    volumen promedio, complejidad (simples vs. complejos).
-    """
-    return _query(lambda: queries.document_logistics_efficiency(dataset_id, graph_type))
-
-
-@router.get("/datasets/{dataset_id}/supply/best-savings-by-document", response_model=QueryResponse)
-def best_savings_by_document(dataset_id: str, limit: int = 15) -> QueryResponse:
-    """
-    PUNTO 4: Mejores ahorros considerando co-compras.
-    Mejora a Bellman-Ford: en lugar de ahorro por entidad-producto promedio,
-    busca documentos donde múltiples productos se compraron juntos (mismo proveedor)
-    y calcula ahorros considerando esa co-compra.
-    """
-    return _query(lambda: queries.best_savings_by_document(dataset_id, limit))
-
-
-@router.get("/datasets/{dataset_id}/documents/concentration-analysis", response_model=QueryResponse)
-def document_concentration_analysis(dataset_id: str, graph_type: str = "sales") -> QueryResponse:
-    """
-    PUNTO 5: Concentración de líneas.
-    ¿El negocio crece por volumen (muchos documentos simples) o por diversidad (documentos complejos)?
-    Métrica: Coeficiente Gini sobre distribución de productos por documento.
-    """
-    return _query(lambda: queries.document_concentration_analysis(dataset_id, graph_type))
 
 
 @router.get("/datasets/{dataset_id}/graph/summary")

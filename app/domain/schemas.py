@@ -42,12 +42,3 @@ class BudgetRequest(BaseModel):
     budget: float
     items: list[BudgetItem]
 
-
-class PurchaseItem(BaseModel):
-    product_id: str
-    quantity: float
-
-
-class PurchaseOptimizeRequest(BaseModel):
-    items: list[PurchaseItem]
-

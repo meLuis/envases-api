@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import defaultdict
-import heapq
 from typing import Any
 
 import pandas as pd
@@ -332,105 +331,4 @@ def bellman_ford_savings(options: pd.DataFrame) -> dict[str, Any]:
             "iterations": num_vertices - 1,
             "negative_edges": negative_edges,
         },
-    }
-
-
-class MinCostFlow:
-    def __init__(self) -> None:
-        self.graph: list[list[list[float]]] = []
-        self.ids: dict[str, int] = {}
-        self.names: list[str] = []
-
-    def node(self, name: str) -> int:
-        if name not in self.ids:
-            self.ids[name] = len(self.names)
-            self.names.append(name)
-            self.graph.append([])
-        return self.ids[name]
-
-    def add_edge(self, source: str, target: str, capacity: float, cost: float) -> None:
-        u = self.node(source)
-        v = self.node(target)
-        self.graph[u].append([v, capacity, cost, len(self.graph[v])])
-        self.graph[v].append([u, 0.0, -cost, len(self.graph[u]) - 1])
-
-    def solve(self, source_name: str, sink_name: str) -> dict[str, Any]:
-        source = self.node(source_name)
-        sink = self.node(sink_name)
-        total_flow = 0.0
-        total_cost = 0.0
-        paths = 0
-        while True:
-            dist = [float("inf")] * len(self.graph)
-            parent: list[tuple[int, int] | None] = [None] * len(self.graph)
-            dist[source] = 0.0
-            heap = [(0.0, source)]
-            while heap:
-                d, u = heapq.heappop(heap)
-                if d > dist[u]:
-                    continue
-                for i, edge in enumerate(self.graph[u]):
-                    v, cap, cost, _ = edge
-                    if cap > 1e-9 and d + cost < dist[v]:
-                        dist[v] = d + cost
-                        parent[v] = (u, i)
-                        heapq.heappush(heap, (dist[v], v))
-            if parent[sink] is None:
-                break
-            bottleneck = float("inf")
-            node = sink
-            while node != source:
-                u, i = parent[node]
-                bottleneck = min(bottleneck, self.graph[u][i][1])
-                node = u
-            node = sink
-            while node != source:
-                u, i = parent[node]
-                edge = self.graph[u][i]
-                edge[1] -= bottleneck
-                self.graph[edge[0]][int(edge[3])][1] += bottleneck
-                total_cost += bottleneck * edge[2]
-                node = u
-            total_flow += bottleneck
-            paths += 1
-        return {"flow": total_flow, "cost": round(total_cost, 2), "augmenting_paths": paths}
-
-    def flows(self) -> list[dict[str, Any]]:
-        rows = []
-        for u, edges in enumerate(self.graph):
-            source = self.names[u]
-            if not source.startswith("SKU:"):
-                continue
-            for v, _, cost, rev in edges:
-                target = self.names[v]
-                flow = self.graph[v][int(rev)][1]
-                if target.startswith("SUPPLIER:") and flow > 1e-9:
-                    rows.append({"product_id": source.replace("SKU:", ""), "supplier": target.replace("SUPPLIER:", ""), "units": round(flow, 2), "unit_cost": cost, "subtotal": round(flow * cost, 2)})
-        return rows
-
-
-def optimize_purchase_flow(options: pd.DataFrame, order: dict[str, float]) -> dict[str, Any]:
-    network = MinCostFlow()
-    requested = 0.0
-    for product_id, quantity in order.items():
-        requested += float(quantity)
-        network.add_edge("SOURCE", f"SKU:{product_id}", float(quantity), 0.0)
-    suppliers_seen: set[str] = set()
-    for row in options.itertuples(index=False):
-        product_id = str(row.product_id)
-        if product_id not in order:
-            continue
-        network.add_edge(f"SKU:{product_id}", f"SUPPLIER:{row.supplier}", float(row.capacity_units), float(row.unit_cost))
-        supplier = str(row.supplier)
-        if supplier not in suppliers_seen:
-            suppliers_seen.add(supplier)
-            network.add_edge(f"SUPPLIER:{supplier}", "SINK", float(row.supplier_capacity), 0.0)
-    solution = network.solve("SOURCE", "SINK")
-    return {
-        "method": "min_cost_flow",
-        "plan": network.flows(),
-        "total_cost": solution["cost"],
-        "units_assigned": solution["flow"],
-        "units_unfilled": round(requested - solution["flow"], 2),
-        "augmenting_paths": solution["augmenting_paths"],
     }

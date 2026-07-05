@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.algorithms import families_from_projection, optimize_purchase_flow
+from app.core.algorithms import UFDS, families_from_projection
 
 
 def test_ufds_groups_projection_edges() -> None:
@@ -16,14 +16,21 @@ def test_ufds_groups_projection_edges() -> None:
     assert set(families["family_size"]) == {2}
 
 
-def test_min_cost_flow_assigns_cheapest_available_supplier() -> None:
-    options = pd.DataFrame(
-        [
-            {"product_id": "P1", "supplier": "A", "unit_cost": 1.0, "capacity_units": 5, "supplier_capacity": 5},
-            {"product_id": "P1", "supplier": "B", "unit_cost": 2.0, "capacity_units": 10, "supplier_capacity": 10},
-        ]
-    )
-    result = optimize_purchase_flow(options, {"P1": 8})
-    assert result["units_assigned"] == 8
-    assert result["total_cost"] == 11.0
-
+def test_ufds_kruskal_skips_cycle_edges() -> None:
+    # Kruskal usa UFDS: al recorrer aristas ordenadas por peso, une componentes y
+    # descarta las que cerrarian un ciclo. Sobre el triangulo A-B-C, la 3.a arista
+    # (que reconecta A y C) debe rechazarse.
+    edges = [("A", "B", 1.0), ("B", "C", 2.0), ("A", "C", 3.0)]
+    uf = UFDS()
+    accepted = []
+    rejected = []
+    for s, t, _ in sorted(edges, key=lambda e: e[2]):
+        if uf.find(s) != uf.find(t):
+            uf.union(s, t)
+            accepted.append((s, t))
+        else:
+            rejected.append((s, t))
+    assert accepted == [("A", "B"), ("B", "C")]
+    assert rejected == [("A", "C")]
+    # Todo quedo en un solo arbol/componente.
+    assert len({uf.find(n) for n in ("A", "B", "C")}) == 1
