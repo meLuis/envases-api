@@ -14,15 +14,12 @@ router = APIRouter()
 
 GRAPH_VISUALIZATION_ARTIFACTS = {
     "g_attr_full.png",
-    "g_attr_attribute_projection.png",
-    "g_attr_product_attribute_focus.png",
-    "g_attr_frasco_vidrio_ambar.png",
     "g_sales_full.png",
-    "g_sales_overview.png",
     "g_purchases_full.png",
-    "g_purchases_overview.png",
     "g_business_full.png",
-    "g_business_overview.png",
+    "g_supplier_projection_full.png",
+    "g_offers_full.png",
+    "g_flow_full.png",
     "visualization_manifest.json",
 }
 
@@ -110,7 +107,12 @@ def get_artifact(dataset_id: str, artifact_name: str):
             pass
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Artefacto no encontrado.")
-    return FileResponse(path)
+    # Los artefactos son INMUTABLES: el dataset_id es una dirección de contenido y
+    # los archivos (CSV, JSON, PNG) nunca se reescriben para un id dado. Sin esta
+    # cabecera, Starlette reenvía el archivo completo en cada request (no responde
+    # 304), así que cada cambio de grafo re-descargaba 1–2 MB. Con immutable el
+    # navegador lo cachea y no vuelve a pedirlo → cambiar/volver de grafo es instantáneo.
+    return FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 @router.get("/datasets/{dataset_id}/products/search", response_model=QueryResponse)

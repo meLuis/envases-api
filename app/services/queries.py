@@ -398,6 +398,24 @@ def graph_summary(dataset_id: str) -> dict:
         }
     except FileNotFoundError:
         pass
+    try:
+        offers = read_json(dataset_id, "bellman_ford_summary.json")
+        result["by_graph"]["G_offers"] = {
+            "nodes": offers.get("vertices", 0),
+            "edges": offers.get("edges", 0),
+        }
+    except FileNotFoundError:
+        pass
+    try:
+        options = read_csv(dataset_id, "supply_options.csv")
+        products = options["product_id"].astype(str).nunique() if "product_id" in options else 0
+        suppliers = options["supplier"].astype(str).nunique() if "supplier" in options else 0
+        result["by_graph"]["flow"] = {
+            "nodes": int(products + suppliers + 2),
+            "edges": int(len(options) + products + suppliers),
+        }
+    except FileNotFoundError:
+        pass
     result["node_type_breakdown"] = type_counts
     result["total_unique_nodes"] = sum(type_counts.values())
     return result

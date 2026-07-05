@@ -1,27 +1,18 @@
-"""Imágenes PNG estáticas para los grafos principales.
+﻿"""Imagenes PNG estaticas para los grafos expuestos en el sandbox.
 
-G_attr conserva los tres estilos del proyecto base:
-1. Proyección en columnas por capa (TYPE, SUBTYPE, … MOUTH_SIZE).
-2. Subgrafo force-directed producto ↔ atributos principales.
-3. Familia de atributos (FRASCO + VIDRIO + AMBAR…).
-
-Además se generan láminas estáticas completas para G_sales, G_purchases y
-G_business. Las vistas completas priorizan evidenciar escala: pueden ser densas
-si el grafo tiene miles de nodos, mientras que las muestras secundarias quedan
-para lectura rápida.
+Se genera una lamina principal por estructura visible:
+G_attr, G_sales, G_purchases, G_business, G_supplier_projection, G_offers y flow.
 
 Adaptado al esquema de aristas del backend actual (columna `edge_type` en vez de
 `relation`; el peso de arista usa `weight`/`amount` cuando existen).
 Se importa de forma perezosa para no exigir matplotlib/networkx salvo cuando se
-generan imágenes.
+generan imagenes.
 """
 
 from __future__ import annotations
 
-import itertools
 import json
 import math
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -121,129 +112,6 @@ def load_named_graph_tables(base_dir: str | Path, name: str) -> tuple[pd.DataFra
     edges = _safe_read_csv(base / f"transaction_graph_{name}_edges.csv")
     metrics = _safe_read_json(base / f"transaction_graph_{name}_metrics.json")
     return nodes, edges, metrics
-
-
-def product_activity_score(graph, product_node: str) -> float:
-    data = graph.nodes[product_node]
-    return float(data.get("sales_rows", 0) or 0) + float(data.get("purchases_rows", 0) or 0)
-
-
-def select_focus_product_attribute_graph(graph, top_attribute_count: int = 16, max_products: int = 120):
-    attribute_nodes = [n for n, d in graph.nodes(data=True) if d.get("node_type") != "PRODUCT"]
-    top_attrs = sorted(attribute_nodes, key=lambda node: graph.degree(node), reverse=True)[:top_attribute_count]
-
-    candidate_products = set()
-    for attr in top_attrs:
-        candidate_products.update(
-            neighbor for neighbor in graph.neighbors(attr) if graph.nodes[neighbor].get("node_type") == "PRODUCT"
-        )
-
-    selected_products = sorted(
-        candidate_products,
-        key=lambda node: (product_activity_score(graph, node), graph.degree(node)),
-        reverse=True,
-    )[:max_products]
-    selected = set(top_attrs) | set(selected_products)
-    return graph.subgraph(selected).copy()
-
-
-def build_attribute_projection(graph, max_attribute_nodes: int = 85, min_edge_weight: int = 3):
-    import networkx as nx
-
-    attribute_nodes = [n for n, d in graph.nodes(data=True) if d.get("node_type") != "PRODUCT"]
-    selected_attrs = set(
-        sorted(attribute_nodes, key=lambda node: graph.degree(node), reverse=True)[:max_attribute_nodes]
-    )
-
-    projection = nx.Graph()
-    for node in selected_attrs:
-        projection.add_node(node, **graph.nodes[node])
-
-    edge_counter: Counter[tuple[str, str]] = Counter()
-    product_count = 0
-    for product, data in graph.nodes(data=True):
-        if data.get("node_type") != "PRODUCT":
-            continue
-        attrs = sorted(neighbor for neighbor in graph.neighbors(product) if neighbor in selected_attrs)
-        if len(attrs) < 2:
-            continue
-        product_count += 1
-        for left, right in itertools.combinations(attrs, 2):
-            edge_counter[(left, right)] += 1
-
-    for (left, right), weight in edge_counter.items():
-        if weight >= min_edge_weight:
-            projection.add_edge(left, right, weight=weight)
-
-    projection.graph["product_count"] = product_count
-    projection.graph["min_edge_weight"] = min_edge_weight
-    return projection
-
-
-def layered_attribute_layout(graph) -> dict[str, tuple[float, float]]:
-    by_type: dict[str, list[str]] = {node_type: [] for node_type in LAYER_ORDER}
-    for node, data in graph.nodes(data=True):
-        node_type = data.get("node_type")
-        if node_type in by_type:
-            by_type[node_type].append(node)
-
-    pos: dict[str, tuple[float, float]] = {}
-    for x_index, node_type in enumerate(LAYER_ORDER):
-        nodes = sorted(by_type[node_type], key=lambda node: graph.degree(node), reverse=True)
-        count = len(nodes)
-        if count == 0:
-            continue
-        y_values = list(reversed([index - (count - 1) / 2 for index in range(count)]))
-        for node, y_value in zip(nodes, y_values):
-            pos[node] = (x_index * 3.0, y_value * 0.55)
-    return pos
-
-
-def draw_attribute_projection(graph, output_path, mpatches, plt, nx) -> str:
-    pos = layered_attribute_layout(graph)
-    fig, ax = plt.subplots(figsize=(22, 11), dpi=180)
-    fig.patch.set_facecolor("#111111")
-    ax.set_facecolor("#111111")
-
-    edge_widths = [
-        max(0.25, min(3.0, math.log1p(data.get("weight", 1)) * 0.45))
-        for _, _, data in graph.edges(data=True)
-    ]
-    nx.draw_networkx_edges(graph, pos, ax=ax, edge_color="#6b7280", alpha=0.28, width=edge_widths)
-
-    for node_type in LAYER_ORDER:
-        nodes = [n for n, d in graph.nodes(data=True) if d.get("node_type") == node_type]
-        sizes = [260 + graph.degree(node) * 13 for node in nodes]
-        nx.draw_networkx_nodes(
-            graph, pos, nodelist=nodes, node_color=NODE_COLORS[node_type],
-            node_size=sizes, edgecolors="#f8fafc", linewidths=1.2, alpha=0.96, ax=ax,
-        )
-
-    labels = {node: str(data.get("label", node))[:18] for node, data in graph.nodes(data=True)}
-    nx.draw_networkx_labels(graph, pos, labels=labels, font_size=6, font_color="#f8fafc", font_weight="bold", ax=ax)
-
-    for x_index, node_type in enumerate(LAYER_ORDER):
-        ax.text(
-            x_index * 3.0, ax.get_ylim()[1] + 0.25, node_type.replace("_", " ").lower(),
-            color=NODE_COLORS[node_type], fontsize=10, fontweight="bold", ha="center",
-        )
-
-    title = (
-        "G_attr - proyeccion estatica de atributos "
-        f"({graph.number_of_nodes()} nodos, {graph.number_of_edges()} conexiones, "
-        f"{graph.graph.get('product_count', 0)} productos)"
-    )
-    ax.set_title(title, color="#f8fafc", fontsize=14, pad=18)
-    legend = [mpatches.Patch(color=NODE_COLORS[node_type], label=node_type) for node_type in LAYER_ORDER]
-    ax.legend(handles=legend, loc="lower right", facecolor="#111111", edgecolor="#4b5563", labelcolor="#f8fafc")
-    ax.axis("off")
-    fig.tight_layout()
-
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, bbox_inches="tight", facecolor=fig.get_facecolor())
-    plt.close(fig)
-    return str(output)
 
 
 def full_attribute_layout(graph) -> dict[str, tuple[float, float]]:
@@ -348,168 +216,15 @@ def draw_full_attribute_graph(graph, output_path, mpatches, plt, nx) -> str:
     return str(output)
 
 
-def draw_focus_product_attribute_graph(graph, output_path, mpatches, plt, nx) -> str:
-    pos = nx.spring_layout(graph, seed=42, k=0.85, iterations=180, weight="weight")
-    fig, ax = plt.subplots(figsize=(18, 12), dpi=180)
-    fig.patch.set_facecolor("#ffffff")
-    ax.set_facecolor("#ffffff")
-
-    nx.draw_networkx_edges(graph, pos, ax=ax, edge_color="#cbd5e1", alpha=0.45, width=0.8)
-
-    for node_type, color in NODE_COLORS.items():
-        nodes = [n for n, d in graph.nodes(data=True) if d.get("node_type") == node_type]
-        if not nodes:
-            continue
-        if node_type == "PRODUCT":
-            sizes = [22 + min(product_activity_score(graph, node), 40) * 0.8 for node in nodes]
-            alpha = 0.38
-        else:
-            sizes = [420 + graph.degree(node) * 18 for node in nodes]
-            alpha = 0.96
-        nx.draw_networkx_nodes(
-            graph, pos, nodelist=nodes, node_color=color, node_size=sizes,
-            edgecolors="#334155" if node_type != "PRODUCT" else "#94a3b8",
-            linewidths=0.8, alpha=alpha, ax=ax,
-        )
-
-    labels = {
-        node: str(data.get("label", node))[:22]
-        for node, data in graph.nodes(data=True)
-        if data.get("node_type") != "PRODUCT"
-    }
-    nx.draw_networkx_labels(graph, pos, labels=labels, font_size=8, font_color="#0f172a", font_weight="bold", ax=ax)
-
-    title = (
-        "G_attr - subgrafo estatico de productos y atributos principales "
-        f"({graph.number_of_nodes()} nodos, {graph.number_of_edges()} aristas)"
-    )
-    ax.set_title(title, loc="left", fontsize=14, fontweight="bold", color="#111827", pad=16)
-    legend = [
-        mpatches.Patch(color=color, label=node_type)
-        for node_type, color in NODE_COLORS.items()
-        if any(data.get("node_type") == node_type for _, data in graph.nodes(data=True))
-    ]
-    ax.legend(handles=legend, loc="lower right", frameon=True)
-    ax.axis("off")
-    fig.tight_layout()
-
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, bbox_inches="tight", facecolor=fig.get_facecolor())
-    plt.close(fig)
-    return str(output)
-
-
-def draw_attribute_family_graph(graph, output_path, mpatches, plt, nx, center_nodes: list[str] | None = None) -> str:
-    center_nodes = center_nodes or ["TYPE:FRASCO", "MATERIAL:VIDRIO", "COLOR:AMBAR", "CAPACITY:10ML"]
-    selected = set(node for node in center_nodes if node in graph)
-    for center in list(selected):
-        products = [
-            neighbor for neighbor in graph.neighbors(center)
-            if graph.nodes[neighbor].get("node_type") == "PRODUCT"
-        ]
-        products = sorted(products, key=lambda node: product_activity_score(graph, node), reverse=True)[:35]
-        selected.update(products)
-        for product in products:
-            selected.update(
-                neighbor for neighbor in graph.neighbors(product)
-                if graph.nodes[neighbor].get("node_type") != "PRODUCT"
-            )
-
-    subgraph = graph.subgraph(selected).copy()
-    return draw_focus_product_attribute_graph(subgraph, output_path, mpatches, plt, nx)
-
-
-def select_transaction_overview_graph(graph, max_primary: int = 10, max_products: int = 34, max_documents: int = 32):
-    """Subgrafo secundario: contraparte(s) centrales + productos/docs conectados."""
-    if graph.number_of_nodes() == 0:
-        return graph.copy()
-
-    primary_types = {"CLIENT", "SUPPLIER"}
-    primary = [
-        node for node, data in graph.nodes(data=True)
-        if data.get("node_type") in primary_types
-    ]
-    if not primary:
-        primary = [node for node in graph.nodes if not str(node).startswith("PRODUCT:")]
-    primary = sorted(primary, key=lambda node: graph.degree(node), reverse=True)[:max_primary]
-
-    selected = set(primary)
-    products: set[str] = set()
-    documents: set[str] = set()
-    for node in primary:
-        for neighbor in graph.neighbors(node):
-            ntype = graph.nodes[neighbor].get("node_type")
-            if ntype == "PRODUCT":
-                products.add(neighbor)
-            elif ntype == "DOCUMENT":
-                documents.add(neighbor)
-                products.update(
-                    n for n in graph.neighbors(neighbor)
-                    if graph.nodes[n].get("node_type") == "PRODUCT"
-                )
-
-    products = set(sorted(products, key=lambda node: graph.degree(node), reverse=True)[:max_products])
-    documents = set(sorted(documents, key=lambda node: graph.degree(node), reverse=True)[:max_documents])
-    selected.update(products)
-    selected.update(documents)
-
-    # Si el grafo directo CLIENT/SUPPLIER -> PRODUCT domina, incluir también
-    # vecinos secundarios de los productos para que se vea la conectividad.
-    if len(selected) < 28:
-        for product in list(products)[:16]:
-            neighbors = sorted(graph.neighbors(product), key=lambda node: graph.degree(node), reverse=True)
-            selected.update(neighbors[:4])
-            if len(selected) >= 70:
-                break
-
-    return graph.subgraph(selected).copy()
-
-
-def transaction_layout(graph, nx) -> dict[str, tuple[float, float]]:
-    """Layout radial por tipo para lectura consistente en láminas estáticas."""
-    by_type: dict[str, list[str]] = {}
-    for node, data in graph.nodes(data=True):
-        by_type.setdefault(data.get("node_type", "OTHER"), []).append(node)
-
-    if "CLIENT" in by_type or "SUPPLIER" in by_type:
-        left_types = ["CLIENT", "SUPPLIER"]
-    else:
-        left_types = []
-    columns = [
-        (left_types, -3.2),
-        (["DOCUMENT"], 0.0),
-        (["PRODUCT"], 3.2),
-    ]
-    pos: dict[str, tuple[float, float]] = {}
-    for types, x in columns:
-        nodes: list[str] = []
-        for node_type in types:
-            nodes.extend(by_type.get(node_type, []))
-        nodes = sorted(nodes, key=lambda node: graph.degree(node), reverse=True)
-        if not nodes:
-            continue
-        count = len(nodes)
-        y_values = list(reversed([index - (count - 1) / 2 for index in range(count)]))
-        spacing = max(0.33, min(0.72, 18 / max(count, 1)))
-        for node, y in zip(nodes, y_values):
-            pos[node] = (x, y * spacing)
-
-    remaining = [node for node in graph.nodes if node not in pos]
-    if remaining:
-        spring_pos = nx.spring_layout(graph.subgraph(remaining), seed=42)
-        for node, (x, y) in spring_pos.items():
-            pos[node] = (float(x), float(y))
-    return pos
 
 
 def concentric_layout(rings: list[list[str]]) -> dict[str, tuple[float, float]]:
-    """Coloca cada anillo (lista de nodos, de adentro hacia afuera) en un círculo.
+    """Coloca cada anillo (lista de nodos, de adentro hacia afuera) en un cÃ­rculo.
 
-    Los anillos se espacian de forma UNIFORME (radio = índice del anillo): así
-    quedan aros concéntricos limpios y parejos que llenan el disco, sin huecos
+    Los anillos se espacian de forma UNIFORME (radio = Ã­ndice del anillo): asÃ­
+    quedan aros concÃ©ntricos limpios y parejos que llenan el disco, sin huecos
     enormes. El llamador ordena los anillos de menor a mayor cantidad, de modo
-    que el aro más interno (menos circunferencia) lleva el grupo más pequeño.
+    que el aro mÃ¡s interno (menos circunferencia) lleva el grupo mÃ¡s pequeÃ±o.
     """
     pos: dict[str, tuple[float, float]] = {}
     non_empty = [ring for ring in rings if ring]
@@ -524,7 +239,7 @@ def concentric_layout(rings: list[list[str]]) -> dict[str, tuple[float, float]]:
 
 
 def _rings_by_count(graph, groups: list[list[str]]) -> list[list[str]]:
-    """Construye anillos por grupos de tipos, ordenados de menor a mayor tamaño.
+    """Construye anillos por grupos de tipos, ordenados de menor a mayor tamaÃ±o.
 
     Cada grupo es una lista de node_types que comparten anillo. Dentro del anillo
     los nodos quedan contiguos por tipo y ordenados por grado (los hubs juntos).
@@ -556,8 +271,8 @@ def draw_transaction_full_graph(graph, output_path, title: str, mpatches, plt, n
     fig.patch.set_facecolor("#0b1020")
     ax.set_facecolor("#0b1020")
 
-    # Layout circular: anillos concéntricos por tipo (entidades dentro, el grupo
-    # más numeroso en el aro exterior).
+    # Layout circular: anillos concÃ©ntricos por tipo (entidades dentro, el grupo
+    # mÃ¡s numeroso en el aro exterior).
     pos = concentric_layout(
         _rings_by_count(graph, [["CLIENT"], ["SUPPLIER"], ["DOCUMENT"], ["PRODUCT"]])
     )
@@ -616,65 +331,164 @@ def draw_transaction_full_graph(graph, output_path, title: str, mpatches, plt, n
     return str(output)
 
 
-def draw_transaction_overview_graph(graph, output_path, title: str, mpatches, plt, nx) -> str:
-    fig, ax = plt.subplots(figsize=(22, 13), dpi=180)
+def _draw_generic_static_graph(graph, output_path, title: str, mpatches, plt, nx) -> str:
+    fig, ax = plt.subplots(figsize=(24, 16), dpi=170)
     fig.patch.set_facecolor("#0b1020")
     ax.set_facecolor("#0b1020")
 
-    pos = transaction_layout(graph, nx)
-    edge_widths = []
-    for _, _, data in graph.edges(data=True):
-        amount = abs(_to_float(data.get("amount", 0), 0.0))
-        weight = abs(_to_float(data.get("weight", 1), 1.0))
-        basis = amount if amount > 0 else weight
-        edge_widths.append(max(0.35, min(3.2, math.log1p(basis) * 0.32)))
+    if graph.number_of_nodes() == 0:
+        ax.set_title(f"{title} - sin nodos", color="#f8fafc", fontsize=16, fontweight="bold", loc="left")
+        ax.axis("off")
+    else:
+        pos = nx.spring_layout(graph, seed=42, k=1.3, iterations=180, weight="layout_weight")
+        widths = [
+            max(0.25, min(3.2, math.log1p(abs(_to_float(data.get("weight", 1), 1.0))) * 0.45))
+            for _, _, data in graph.edges(data=True)
+        ]
+        nx.draw_networkx_edges(graph, pos, ax=ax, edge_color="#64748b", alpha=0.2, width=widths)
 
-    nx.draw_networkx_edges(
-        graph, pos, ax=ax, edge_color="#64748b", alpha=0.34,
-        width=edge_widths,
-    )
+        drawn: set[str] = set()
+        for node_type, color in NODE_COLORS.items():
+            nodes = [node for node, data in graph.nodes(data=True) if data.get("node_type") == node_type]
+            if not nodes:
+                continue
+            drawn.update(nodes)
+            sizes = [160 + min(graph.degree(node), 40) * 18 for node in nodes]
+            nx.draw_networkx_nodes(
+                graph, pos, nodelist=nodes, node_color=color, node_size=sizes,
+                edgecolors="#dbeafe", linewidths=0.8, alpha=0.94, ax=ax,
+            )
 
-    for node_type, color in NODE_COLORS.items():
-        nodes = [node for node, data in graph.nodes(data=True) if data.get("node_type") == node_type]
-        if not nodes:
-            continue
-        sizes = [260 + min(graph.degree(node), 28) * 22 for node in nodes]
-        if node_type == "PRODUCT":
-            sizes = [190 + min(graph.degree(node), 28) * 16 for node in nodes]
-        nx.draw_networkx_nodes(
-            graph, pos, nodelist=nodes, node_color=color, node_size=sizes,
-            edgecolors="#dbeafe", linewidths=1.0, alpha=0.94, ax=ax,
+        other_nodes = [node for node in graph.nodes if node not in drawn]
+        if other_nodes:
+            sizes = [140 + min(graph.degree(node), 40) * 14 for node in other_nodes]
+            nx.draw_networkx_nodes(
+                graph, pos, nodelist=other_nodes, node_color="#94a3b8", node_size=sizes,
+                edgecolors="#dbeafe", linewidths=0.8, alpha=0.9, ax=ax,
+            )
+
+        label_nodes = sorted(graph.nodes, key=lambda node: graph.degree(node), reverse=True)[:80]
+        labels = {node: str(graph.nodes[node].get("label", node))[:24] for node in label_nodes}
+        nx.draw_networkx_labels(
+            graph, pos, labels=labels, font_size=6.2, font_color="#f8fafc",
+            font_weight="bold", ax=ax,
         )
 
-    label_nodes = sorted(graph.nodes, key=lambda node: graph.degree(node), reverse=True)[:42]
-    labels = {
-        node: str(graph.nodes[node].get("label", node))[:24]
-        for node in label_nodes
-    }
-    nx.draw_networkx_labels(
-        graph, pos, labels=labels, font_size=7, font_color="#f8fafc",
-        font_weight="bold", ax=ax,
-    )
+        ax.set_title(
+            f"{title} - grafo completo ({graph.number_of_nodes()} nodos, {graph.number_of_edges()} aristas)",
+            color="#f8fafc", fontsize=16, fontweight="bold", loc="left", pad=18,
+        )
+        legend = [
+            mpatches.Patch(color=color, label=node_type)
+            for node_type, color in NODE_COLORS.items()
+            if any(data.get("node_type") == node_type for _, data in graph.nodes(data=True))
+        ]
+        if legend:
+            ax.legend(handles=legend, loc="lower right", facecolor="#111827", edgecolor="#334155", labelcolor="#f8fafc")
+        ax.axis("off")
 
-    ax.set_title(
-        f"{title} - muestra estatica ({graph.number_of_nodes()} nodos, {graph.number_of_edges()} aristas)",
-        color="#f8fafc", fontsize=15, fontweight="bold", loc="left", pad=18,
-    )
-    legend = [
-        mpatches.Patch(color=color, label=node_type)
-        for node_type, color in NODE_COLORS.items()
-        if any(data.get("node_type") == node_type for _, data in graph.nodes(data=True))
-    ]
-    if legend:
-        ax.legend(handles=legend, loc="lower right", facecolor="#111827", edgecolor="#334155", labelcolor="#f8fafc")
-    ax.axis("off")
     fig.tight_layout()
-
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
     return str(output)
+
+
+def build_supplier_projection_graph(edges: pd.DataFrame, nx) -> Any:
+    graph = nx.Graph()
+    for row in edges.itertuples(index=False):
+        source = str(row.source)
+        target = str(row.target)
+        source_name = str(getattr(row, "source_name", source) or source)
+        target_name = str(getattr(row, "target_name", target) or target)
+        similarity = _to_float(getattr(row, "similarity", 0), 0.0)
+        graph.add_node(source, label=source_name, node_type="SUPPLIER")
+        graph.add_node(target, label=target_name, node_type="SUPPLIER")
+        graph.add_edge(
+            source,
+            target,
+            weight=similarity,
+            layout_weight=max(similarity, 0.01),
+            edge_type="supplier_similarity",
+        )
+    return graph
+
+
+def build_offers_graph(edges: pd.DataFrame, nx) -> Any:
+    graph = nx.DiGraph()
+    for row in edges.itertuples(index=False):
+        source = str(row.source)
+        target = str(row.target)
+        weight = _to_float(getattr(row, "weight", 0), 0.0)
+        supplier = str(getattr(row, "supplier", "") or "")
+        source_type = "OTHER" if source == "SOURCE" else "PRODUCT"
+        target_type = "SUPPLIER" if target.startswith("OPTION:") else "PRODUCT"
+        graph.add_node(source, label=source.replace("PRODUCT:", ""), node_type=source_type)
+        graph.add_node(target, label=supplier or target.replace("OPTION:", ""), node_type=target_type)
+        graph.add_edge(
+            source,
+            target,
+            weight=weight,
+            layout_weight=1.0 / (abs(weight) + 1.0),
+            edge_type=str(getattr(row, "edge_type", "")),
+        )
+    return graph
+
+
+def build_flow_graph(options: pd.DataFrame, nx, max_products: int = 50, max_suppliers: int = 20) -> Any:
+    graph = nx.DiGraph()
+    graph.add_node("SOURCE", label="SOURCE", node_type="OTHER")
+    graph.add_node("SINK", label="SINK", node_type="OTHER")
+    if options.empty:
+        return graph
+    options = options.copy()
+    for column in ("capacity_units", "unit_cost"):
+        if column in options:
+            options[column] = pd.to_numeric(options[column], errors="coerce").fillna(0)
+
+    ranked_products = (
+        options.groupby(["product_id", "product_name"], as_index=False)
+        .agg(total_capacity=("capacity_units", "sum"))
+        .sort_values("total_capacity", ascending=False)
+        .head(max_products)
+    )
+    selected_products = set(ranked_products["product_id"].astype(str))
+    supplier_capacity = (
+        options.groupby("supplier", as_index=False)
+        .agg(total_capacity=("capacity_units", "sum"))
+        .sort_values("total_capacity", ascending=False)
+        .head(max_suppliers)
+    )
+    selected_suppliers = set(supplier_capacity["supplier"].astype(str))
+
+    for row in ranked_products.itertuples(index=False):
+        product = f"SKU:{row.product_id}"
+        graph.add_node(product, label=str(row.product_name)[:30], node_type="PRODUCT")
+        graph.add_edge("SOURCE", product, weight=float(row.total_capacity or 0), layout_weight=1.0, edge_type="demand")
+
+    filtered = options[
+        options["product_id"].astype(str).isin(selected_products)
+        & options["supplier"].astype(str).isin(selected_suppliers)
+    ]
+    for row in filtered.itertuples(index=False):
+        product = f"SKU:{row.product_id}"
+        supplier = f"SUPPLIER:{row.supplier}"
+        graph.add_node(supplier, label=str(row.supplier)[:30], node_type="SUPPLIER")
+        unit_cost = _to_float(getattr(row, "unit_cost", 0), 0.0)
+        graph.add_edge(
+            product,
+            supplier,
+            weight=unit_cost,
+            layout_weight=1.0 / (unit_cost + 1.0),
+            edge_type="supplier_option",
+        )
+    for supplier in selected_suppliers:
+        supplier_node = f"SUPPLIER:{supplier}"
+        if supplier_node in graph:
+            cap = supplier_capacity.loc[supplier_capacity["supplier"].astype(str) == supplier, "total_capacity"].iloc[0]
+            graph.add_edge(supplier_node, "SINK", weight=float(cap or 0), layout_weight=1.0, edge_type="capacity")
+    return graph
 
 
 def render_graph_visualizations(stage2_output_dir: str | Path, output_dir: str | Path) -> dict[str, str]:
@@ -686,21 +500,10 @@ def render_graph_visualizations(stage2_output_dir: str | Path, output_dir: str |
 
     if not nodes.empty and not edges.empty:
         graph = build_networkx_graph(nodes, edges, nx)
-        focus_graph = select_focus_product_attribute_graph(graph)
-        attribute_projection = build_attribute_projection(graph)
         paths.update(
             {
                 "g_attr_full.png": draw_full_attribute_graph(
                     graph, output / "g_attr_full.png", mpatches, plt, nx
-                ),
-                "g_attr_attribute_projection.png": draw_attribute_projection(
-                    attribute_projection, output / "g_attr_attribute_projection.png", mpatches, plt, nx
-                ),
-                "g_attr_product_attribute_focus.png": draw_focus_product_attribute_graph(
-                    focus_graph, output / "g_attr_product_attribute_focus.png", mpatches, plt, nx
-                ),
-                "g_attr_frasco_vidrio_ambar.png": draw_attribute_family_graph(
-                    graph, output / "g_attr_frasco_vidrio_ambar.png", mpatches, plt, nx
                 ),
             }
         )
@@ -719,10 +522,41 @@ def render_graph_visualizations(stage2_output_dir: str | Path, output_dir: str |
         paths[full_filename] = draw_transaction_full_graph(
             tx_graph, output / full_filename, title, mpatches, plt, nx
         )
-        overview = select_transaction_overview_graph(tx_graph)
-        filename = f"g_{name}_overview.png"
-        paths[filename] = draw_transaction_overview_graph(
-            overview, output / filename, title, mpatches, plt, nx
+
+    supplier_edges = _safe_read_csv(Path(stage2_output_dir) / "supplier_projection_edges.csv")
+    if not supplier_edges.empty:
+        supplier_graph = build_supplier_projection_graph(supplier_edges, nx)
+        paths["g_supplier_projection_full.png"] = _draw_generic_static_graph(
+            supplier_graph,
+            output / "g_supplier_projection_full.png",
+            "G_supplier_projection - proveedores similares",
+            mpatches,
+            plt,
+            nx,
+        )
+
+    offer_edges = _safe_read_csv(Path(stage2_output_dir) / "bellman_ford_edges.csv")
+    if not offer_edges.empty:
+        offers_graph = build_offers_graph(offer_edges, nx)
+        paths["g_offers_full.png"] = _draw_generic_static_graph(
+            offers_graph,
+            output / "g_offers_full.png",
+            "G_offers - ahorros Bellman-Ford",
+            mpatches,
+            plt,
+            nx,
+        )
+
+    supply_options = _safe_read_csv(Path(stage2_output_dir) / "supply_options.csv")
+    if not supply_options.empty:
+        flow_graph = build_flow_graph(supply_options, nx)
+        paths["g_flow_full.png"] = _draw_generic_static_graph(
+            flow_graph,
+            output / "g_flow_full.png",
+            "flow - red de optimizacion de compras",
+            mpatches,
+            plt,
+            nx,
         )
 
     manifest_path = output / "visualization_manifest.json"
@@ -731,10 +565,9 @@ def render_graph_visualizations(stage2_output_dir: str | Path, output_dir: str |
         "layout": "static_networkx_png",
         "outputs": {name: str(path) for name, path in paths.items()},
         "notes": [
-            "No HTML interactivo; instantáneas para presentación/documentación.",
-            "Los archivos *_full.png visualizan el grafo completo generado desde los CSV del dataset.",
-            "Los archivos *_overview.png y subgrafos de G_attr son vistas secundarias para lectura rápida.",
-            "Los valores exactos de nodos, aristas y pesos están en los CSV.",
+            "No HTML interactivo; instantÃ¡neas para presentaciÃ³n/documentaciÃ³n.",
+            "Los archivos *_full.png corresponden a las estructuras disponibles en el sandbox algoritmo x grafo.",
+            "Los valores exactos de nodos, aristas y pesos estÃ¡n en los CSV.",
         ],
     }
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
