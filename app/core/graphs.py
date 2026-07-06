@@ -9,6 +9,7 @@ from typing import Any
 import pandas as pd
 
 from app.config import MIN_SUPPLIER_PROJECTION_SIMILARITY, MIN_SUPPLIER_SHARED_PRODUCTS
+from app.core.geo import haversine_km
 from app.core.text import normalize_text
 
 
@@ -340,6 +341,277 @@ def bidirectional_bfs_path(edges: pd.DataFrame, start: str, goal: str) -> list[s
         if meet:
             return _reconstruct(meet, parents_front, parents_back)
     return []
+
+
+# ============================================================================
+# OVERLAY LOGÍSTICO (para A*) — no es un grafo nuevo de la galería, es una capa
+# geográfica sobre G_business: conecta entidades (clientes/proveedores) que
+# comparten producto y pesa cada arista con la distancia real en km.
+# ============================================================================
+
+
+def build_logistics_overlay(
+    business_edges: pd.DataFrame, business_nodes: pd.DataFrame, coords: dict[str, tuple[float, float]]
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """Deriva la capa logística: nodos = entidades con coordenadas; aristas =
+    entidades que comparten al menos un producto, ponderadas por distancia (km).
+
+    Devuelve (nodes_df, edges_df, metrics). Si no hay coordenadas suficientes,
+    devuelve estructuras vacías: A* responderá con el mensaje didáctico de
+    "requiere dataset sintético/logístico".
+    """
+    if business_edges.empty or not coords:
+        return pd.DataFrame(), pd.DataFrame(), {"graph_name": "logistics_overlay", "available": False, "node_count": 0, "edge_count": 0}
+
+    labels: dict[str, str] = {}
+    types: dict[str, str] = {}
+    if not business_nodes.empty:
+        for row in business_nodes.itertuples(index=False):
+            labels[str(row.node_id)] = str(getattr(row, "label", "") or "")
+            types[str(row.node_id)] = str(getattr(row, "node_type", "") or "")
+
+    # producto -> entidades (con coordenadas) que lo transan.
+    product_entities: dict[str, set[str]] = defaultdict(set)
+    for row in business_edges.itertuples(index=False):
+        source = str(row.source)
+        target = str(row.target)
+        entity = source if source in coords else (target if target in coords else None)
+        product = target if target.startswith("PRODUCT:") else (source if source.startswith("PRODUCT:") else None)
+        if entity is None or product is None:
+            continue
+        product_entities[product].add(entity)
+
+    # Arista entidad-entidad si comparten producto; peso = distancia recta (km).
+    seen: dict[tuple[str, str], float] = {}
+    for entities in product_entities.values():
+        members = sorted(entities)
+        for i in range(len(members)):
+            for j in range(i + 1, len(members)):
+                a, b = members[i], members[j]
+                key = (a, b)
+                if key in seen:
+                    continue
+                (lat_a, lon_a), (lat_b, lon_b) = coords[a], coords[b]
+                seen[key] = round(haversine_km(lat_a, lon_a, lat_b, lon_b), 4)
+
+    used_nodes = {node for pair in seen for node in pair}
+    nodes = pd.DataFrame(
+        [
+            {
+                "node_id": node,
+                "node_type": types.get(node, "ENTITY"),
+                "label": labels.get(node, node),
+                "lat": coords[node][0],
+                "lon": coords[node][1],
+            }
+            for node in sorted(used_nodes)
+        ]
+    )
+    edges = pd.DataFrame(
+        [
+            {
+                "source": a,
+                "target": b,
+                "source_name": labels.get(a, a),
+                "target_name": labels.get(b, b),
+                "km": km,
+            }
+            for (a, b), km in sorted(seen.items(), key=lambda kv: kv[1])
+        ]
+    )
+    metrics = {
+        "graph_name": "logistics_overlay",
+        "available": bool(len(edges)),
+        "node_count": int(len(nodes)),
+        "edge_count": int(len(edges)),
+    }
+    return nodes, edges, metrics
+
+
+def a_star_route(
+    edges: pd.DataFrame,
+    coords: dict[str, tuple[float, float]],
+    start: str,
+    goal: str,
+    weight_col: str = "km",
+) -> dict[str, Any]:
+    """A* sobre la capa logística: g(n) = km reales acumulados, h(n) = distancia
+    recta al destino (admisible ⇒ ruta óptima). Devuelve la ruta, el costo total
+    y, para la didáctica, cuántos nodos expandió frente a Dijkstra (h=0)."""
+    adjacency: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    for row in edges.itertuples(index=False):
+        s, t = str(row.source), str(row.target)
+        w = float(getattr(row, weight_col, 0) or 0)
+        adjacency[s].append((t, w))
+        adjacency[t].append((s, w))
+
+    if start not in coords or goal not in coords or start not in adjacency:
+        return {"ok": False, "reason": "endpoint_missing", "path": [], "total_km": 0.0}
+
+    lat_goal, lon_goal = coords[goal]
+
+    def heuristic(node: str) -> float:
+        if node not in coords:
+            return 0.0
+        lat, lon = coords[node]
+        return haversine_km(lat, lon, lat_goal, lon_goal)
+
+    def search(use_heuristic: bool) -> tuple[list[str], float, int, list[dict[str, Any]]]:
+        g_score: dict[str, float] = {start: 0.0}
+        prev: dict[str, str | None] = {start: None}
+        heap: list[tuple[float, float, str]] = [(heuristic(start) if use_heuristic else 0.0, 0.0, start)]
+        expanded = 0
+        order: list[dict[str, Any]] = []
+        closed: set[str] = set()
+        while heap:
+            f, g, node = heapq.heappop(heap)
+            if node in closed:
+                continue
+            closed.add(node)
+            expanded += 1
+            order.append(
+                {
+                    "step": expanded,
+                    "node": node,
+                    "g_km": round(g, 4),
+                    "h_km": round(heuristic(node), 4) if use_heuristic else 0.0,
+                    "f_km": round(f, 4),
+                }
+            )
+            if node == goal:
+                path: list[str] = []
+                cur: str | None = node
+                while cur is not None:
+                    path.append(cur)
+                    cur = prev.get(cur)
+                path.reverse()
+                return path, round(g, 4), expanded, order
+            for neighbor, w in adjacency.get(node, []):
+                tentative = g + w
+                if tentative < g_score.get(neighbor, float("inf")):
+                    g_score[neighbor] = tentative
+                    prev[neighbor] = node
+                    priority = tentative + (heuristic(neighbor) if use_heuristic else 0.0)
+                    heapq.heappush(heap, (priority, tentative, neighbor))
+        return [], 0.0, expanded, order
+
+    path, total_km, expanded, order = search(use_heuristic=True)
+    _, _, baseline_expanded, _ = search(use_heuristic=False)
+    return {
+        "ok": bool(path),
+        "reason": "ok" if path else "no_path",
+        "path": path,
+        "total_km": total_km,
+        "expanded": expanded,
+        "baseline_expanded": baseline_expanded,
+        "visit_order": order,
+    }
+
+
+# ============================================================================
+# TARJAN — puntos de articulación y puentes (nodos/aristas críticos)
+# ============================================================================
+
+
+def tarjan_critical(edges: pd.DataFrame) -> dict[str, Any]:
+    """Puntos de articulación y puentes con DFS de Tarjan (low-link) sobre el
+    grafo NO dirigido. Un punto de articulación es un nodo cuya caída fragmenta
+    la red; un puente, una arista con el mismo efecto. Devuelve, por nodo
+    crítico, cuántas componentes deja al removerlo (impacto)."""
+    adjacency = _adjacency(edges)
+    nodes = list(adjacency.keys())
+    if not nodes:
+        return {"articulation": [], "bridges": [], "components_before": 0}
+
+    disc: dict[str, int] = {}
+    low: dict[str, int] = {}
+    timer = 0
+    articulation: set[str] = set()
+    bridges: list[tuple[str, str]] = []
+
+    # DFS iterativo (grafos comerciales pueden ser grandes: evita recursión).
+    for root in nodes:
+        if root in disc:
+            continue
+        root_children = 0
+        stack: list[tuple[str, str | None, iter]] = [(root, None, iter(adjacency[root]))]
+        disc[root] = low[root] = timer
+        timer += 1
+        while stack:
+            node, parent, neighbors = stack[-1]
+            advanced = False
+            for neighbor in neighbors:
+                if neighbor == parent:
+                    continue
+                if neighbor not in disc:
+                    disc[neighbor] = low[neighbor] = timer
+                    timer += 1
+                    if node == root:
+                        root_children += 1
+                    stack.append((neighbor, node, iter(adjacency[neighbor])))
+                    advanced = True
+                    break
+                low[node] = min(low[node], disc[neighbor])
+            if not advanced:
+                stack.pop()
+                if stack:
+                    parent_node = stack[-1][0]
+                    low[parent_node] = min(low[parent_node], low[node])
+                    if parent_node != root and low[node] >= disc[parent_node]:
+                        articulation.add(parent_node)
+                    if low[node] > disc[parent_node]:
+                        bridges.append((parent_node, node))
+        if root_children > 1:
+            articulation.add(root)
+
+    components_before = _count_components(adjacency)
+    impact = []
+    for node in articulation:
+        after = _count_components_without(adjacency, node)
+        impact.append({"node": node, "components_after_removal": after, "fragments_created": after - components_before})
+    impact.sort(key=lambda item: (item["fragments_created"], item["components_after_removal"]), reverse=True)
+    return {
+        "articulation": impact,
+        "bridges": [{"source": a, "target": b, "km": None} for a, b in bridges],
+        "components_before": components_before,
+        "node_count": len(nodes),
+    }
+
+
+def _count_components(adjacency: dict[str, set[str]]) -> int:
+    seen: set[str] = set()
+    count = 0
+    for node in adjacency:
+        if node in seen:
+            continue
+        count += 1
+        queue = deque([node])
+        seen.add(node)
+        while queue:
+            current = queue.popleft()
+            for neighbor in adjacency[current]:
+                if neighbor not in seen:
+                    seen.add(neighbor)
+                    queue.append(neighbor)
+    return count
+
+
+def _count_components_without(adjacency: dict[str, set[str]], removed: str) -> int:
+    seen: set[str] = {removed}
+    count = 0
+    for node in adjacency:
+        if node in seen:
+            continue
+        count += 1
+        queue = deque([node])
+        seen.add(node)
+        while queue:
+            current = queue.popleft()
+            for neighbor in adjacency[current]:
+                if neighbor != removed and neighbor not in seen:
+                    seen.add(neighbor)
+                    queue.append(neighbor)
+    return count
 
 
 def _transaction_graph(frame: pd.DataFrame, entity_type: str, graph_name: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:

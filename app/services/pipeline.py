@@ -18,12 +18,13 @@ from app.core.algorithms import bellman_ford_savings, build_supply_options, fami
 from app.core.attributes import extract_product_attributes
 from app.core.attribute_llm import gemini_available, refine_rules_with_gemini
 from app.core.graphs import (
+    build_logistics_overlay,
     build_semantic_graph,
     build_supplier_projection,
     build_transaction_graphs,
 )
 from app.core.io import read_table
-from app.core.normalization import normalize_all, profile_frames, quality_summary
+from app.core.normalization import entity_coordinates, normalize_all, profile_frames, quality_summary
 from app.domain.schemas import ArtifactStatus, DatasetSummary
 from app.storage.repository import dataset_dir, ensure_dataset_dir, new_dataset_id, write_csv, write_json
 
@@ -98,13 +99,12 @@ def _build_dataset(dataset_id: str, raw: dict[str, pd.DataFrame]) -> DatasetSumm
         generated.append(ArtifactStatus(name=name, kind="base"))
 
     attributes, attr_report = extract_product_attributes(cleaned["products"])
-    # Refinamiento opcional con Gemini (solo si hay GEMINI_API_KEY): propone
-    # reglas nuevas y se aceptan solo si mejoran sin regresión. Failsafe.
     if gemini_available():
         attributes, attr_report, llm_info = refine_rules_with_gemini(cleaned["products"], attributes, attr_report)
         write_json(dataset_id, "attribute_llm_refinement.json", llm_info)
         generated.append(ArtifactStatus(name="attribute_llm_refinement.json", kind="semantic"))
         warnings.append(f"Gemini: {llm_info.get('status')} ({llm_info.get('reason', llm_info.get('source_model', ''))}).")
+
     if attr_report["coverage"] >= MIN_ATTRIBUTE_COVERAGE:
         write_csv(dataset_id, "product_attributes.csv", attributes)
         write_json(dataset_id, "attribute_extraction_report.json", attr_report)
@@ -151,6 +151,32 @@ def _build_dataset(dataset_id: str, raw: dict[str, pd.DataFrame]) -> DatasetSumm
                     f"transaction_graph_{name}_metrics.json",
                 ]
             )
+
+        # Overlay logístico (A*): capa geográfica sobre G_business. Solo se genera
+        # si el dataset trae coordenadas; si no, A* devuelve el aviso didáctico.
+        business_nodes, business_edges, _ = graphs["business"]
+        coords = entity_coordinates(cleaned)
+        logistics_nodes, logistics_edges, logistics_metrics = build_logistics_overlay(
+            business_edges, business_nodes, coords
+        )
+        if not logistics_edges.empty:
+            write_csv(dataset_id, "logistics_nodes.csv", logistics_nodes)
+            write_csv(dataset_id, "logistics_edges.csv", logistics_edges)
+            write_json(dataset_id, "logistics_metrics.json", logistics_metrics)
+            generated.extend(
+                ArtifactStatus(name=name, kind="graph")
+                for name in ["logistics_nodes.csv", "logistics_edges.csv", "logistics_metrics.json"]
+            )
+        else:
+            omitted.append(
+                ArtifactStatus(
+                    name="logistics_overlay",
+                    kind="graph",
+                    generated=False,
+                    reason="Sin coordenadas lat/lon en ventas/compras: A* requiere dataset sintético/logístico.",
+                )
+            )
+
         supplier_projection_edges, supplier_projection_metrics = build_supplier_projection(cleaned["purchases"])
         if not supplier_projection_edges.empty:
             write_csv(dataset_id, "supplier_projection_edges.csv", supplier_projection_edges)
@@ -173,27 +199,14 @@ def _build_dataset(dataset_id: str, raw: dict[str, pd.DataFrame]) -> DatasetSumm
         else:
             omitted.append(
                 ArtifactStatus(
-                    name="G_supplier_projection", kind="graph", generated=False,
+                    name="G_supplier_projection",
+                    kind="graph",
+                    generated=False,
                     reason="La similitud entre proveedores no genero suficientes aristas.",
                 )
             )
     else:
         omitted.append(ArtifactStatus(name="transaction_graphs", kind="graph", generated=False, reason="Ventas o compras no alcanzan filas minimas."))
-
-    # PNG estáticos de grafos principales (opcional, failsafe: nunca bloquea el dataset).
-    if ENABLE_GRAPH_IMAGES:
-        try:
-            from app.core.graph_visualizer import render_graph_visualizations
-
-            dataset_path = dataset_dir(dataset_id)
-            images = render_graph_visualizations(dataset_path, dataset_path)
-            generated.extend(
-                ArtifactStatus(name=name, kind="visualization")
-                for name in images
-                if (dataset_path / name).exists()
-            )
-        except Exception as exc:  # noqa: BLE001 — visualización es accesoria
-            warnings.append(f"Imágenes de grafos no generadas: {exc}")
 
     options = build_supply_options(cleaned["purchases"])
     if not options.empty:
@@ -216,6 +229,8 @@ def _build_dataset(dataset_id: str, raw: dict[str, pd.DataFrame]) -> DatasetSumm
     else:
         omitted.append(ArtifactStatus(name="supply_options", kind="optimization", generated=False, reason="No hay compras validas con costo unitario."))
 
+    generated.extend(_render_graph_images(dataset_id, warnings))
+
     summary = DatasetSummary(
         dataset_id=dataset_id,
         status="ready",
@@ -226,6 +241,24 @@ def _build_dataset(dataset_id: str, raw: dict[str, pd.DataFrame]) -> DatasetSumm
     )
     write_json(dataset_id, "dataset_summary.json", summary.model_dump())
     return summary
+
+
+def _render_graph_images(dataset_id: str, warnings: list[str]) -> list[ArtifactStatus]:
+    if not ENABLE_GRAPH_IMAGES:
+        return []
+    try:
+        from app.core.graph_visualizer import render_graph_visualizations
+
+        path = dataset_dir(dataset_id)
+        images = render_graph_visualizations(path, path)
+        return [
+            ArtifactStatus(name=name, kind="visualization")
+            for name in images
+            if (path / name).exists()
+        ]
+    except Exception as exc:  # noqa: BLE001 - visualization is optional
+        warnings.append(f"Imagenes de grafos no generadas: {exc}")
+        return []
 
 
 def _validate_minimum(raw: dict[str, pd.DataFrame]) -> None:
@@ -260,8 +293,15 @@ def _company_rules() -> dict:
         "domain": "envases_vidrio_plastico",
         "required_files": ["productos", "ventas", "compras"],
         "llm": "enabled_gemini" if gemini_available() else "disabled",
-        "main_algorithms": ["BFS", "BFS bidireccional", "Programacion dinamica", "Bellman-Ford", "UFDS"],
-        "extra_algorithm": "Min-cost flow",
+        "main_algorithms": [
+            "BFS bidireccional",
+            "A* logistico",
+            "Bellman-Ford",
+            "Kruskal + UFDS",
+            "Tarjan (nodos criticos)",
+            "Programacion dinamica (Knapsack)",
+            "Min-cost flow",
+        ],
     }
 
 

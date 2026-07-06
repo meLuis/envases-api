@@ -6,6 +6,7 @@ from typing import Any
 
 import pandas as pd
 
+from app.core.geo import parse_lat_lon
 from app.core.text import normalize_column, normalize_text, similarity
 
 
@@ -34,6 +35,9 @@ ALIASES: dict[str, dict[str, list[str]]] = {
         "subtotal": ["subtotal"],
         "total": ["total"],
         "voided": ["anulado"],
+        # Coordenadas del cliente (solo en el dataset sintético/logístico; opcional).
+        "lat": ["latitud", "lat", "latitud cliente"],
+        "lon": ["longitud", "lon", "lng", "longitud cliente"],
     },
     "purchases": {
         "date": ["fecha de emision", "fecha", "fec emision"],
@@ -48,6 +52,9 @@ ALIASES: dict[str, dict[str, list[str]]] = {
         "unit_cost": ["precio unitario", "valor unitario", "costo unitario"],
         "subtotal": ["subtotal"],
         "total": ["total"],
+        # Coordenadas del proveedor (solo en el dataset sintético/logístico; opcional).
+        "lat": ["latitud", "lat", "latitud proveedor"],
+        "lon": ["longitud", "lon", "lng", "longitud proveedor"],
     },
 }
 
@@ -124,6 +131,7 @@ def normalize_transactions(frame: pd.DataFrame, mapping: dict[str, Any], kind: s
         subtotal = _to_float(_value(row, mapping, "subtotal"))
         if unit_value <= 0 and quantity > 0:
             unit_value = (subtotal or total) / quantity if (subtotal or total) else 0.0
+        coord = parse_lat_lon(_value(row, mapping, "lat"), _value(row, mapping, "lon"))
         rows.append(
             {
                 "date": _parse_date(_value(row, mapping, "date")),
@@ -142,11 +150,38 @@ def normalize_transactions(frame: pd.DataFrame, mapping: dict[str, Any], kind: s
                 "unit_value": unit_value,
                 "subtotal": subtotal,
                 "total": total,
+                "lat": coord[0] if coord else "",
+                "lon": coord[1] if coord else "",
                 "transaction_type": kind,
             }
         )
     result = pd.DataFrame(rows)
     return result if result.empty else result.sort_values(["date", "product_id"])
+
+
+def entity_coordinates(cleaned: dict[str, pd.DataFrame]) -> dict[str, tuple[float, float]]:
+    """Coordenadas por nodo de negocio (CLIENT:… / SUPPLIER:…) para el A* logístico.
+
+    Toma la primera coordenada válida de cada entidad en ventas (clientes) y
+    compras (proveedores). Devuelve {} si el dataset no trae lat/lon (dataset
+    real): en ese caso A* responde con el mensaje "requiere dataset sintético".
+    """
+    coords: dict[str, tuple[float, float]] = {}
+    for kind, prefix in (("sales", "CLIENT"), ("purchases", "SUPPLIER")):
+        frame = cleaned.get(kind)
+        if frame is None or frame.empty or "lat" not in frame.columns:
+            continue
+        for row in frame.itertuples(index=False):
+            entity_norm = str(getattr(row, "entity_norm", "") or "")
+            if not entity_norm:
+                continue
+            node_id = f"{prefix}:{entity_norm}"
+            if node_id in coords:
+                continue
+            coord = parse_lat_lon(getattr(row, "lat", ""), getattr(row, "lon", ""))
+            if coord:
+                coords[node_id] = coord
+    return coords
 
 
 def profile_frames(raw: dict[str, pd.DataFrame]) -> dict[str, Any]:

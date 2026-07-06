@@ -4,7 +4,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from app.config import ENABLE_GRAPH_IMAGES
-from app.domain.schemas import BudgetRequest, QueryResponse
+from app.domain.schemas import BudgetRequest, MinCostFlowRequest, QueryResponse
 from app.services import queries
 from app.services.pipeline import PipelineError, build_dataset_from_uploads
 from app.storage.repository import list_artifact_files, require_dataset_dir, list_all_datasets, delete_dataset
@@ -129,6 +129,22 @@ def client_to_supplier(dataset_id: str, client: str, supplier: str) -> QueryResp
 @router.get("/datasets/{dataset_id}/paths/weighted", response_model=QueryResponse)
 def weighted_path(dataset_id: str, source: str, target: str, graph_type: str = "business") -> QueryResponse:
     return _query(lambda: queries.weighted_connection(dataset_id, source, target, graph_type))
+
+
+@router.get("/datasets/{dataset_id}/paths/logistics-a-star", response_model=QueryResponse)
+def logistics_a_star(dataset_id: str, client: str, supplier: str) -> QueryResponse:
+    return _query(lambda: queries.logistics_a_star(dataset_id, client, supplier))
+
+
+@router.get("/datasets/{dataset_id}/network/critical-nodes", response_model=QueryResponse)
+def critical_nodes(dataset_id: str, graph_type: str = "business", limit: int = 20) -> QueryResponse:
+    return _query(lambda: queries.critical_nodes(dataset_id, graph_type, limit))
+
+
+@router.post("/datasets/{dataset_id}/supply/min-cost-flow", response_model=QueryResponse)
+def min_cost_flow(dataset_id: str, body: MinCostFlowRequest) -> QueryResponse:
+    items = [item.model_dump() for item in body.items]
+    return _query(lambda: queries.min_cost_supply(dataset_id, items))
 
 
 @router.get("/datasets/{dataset_id}/mst", response_model=QueryResponse)

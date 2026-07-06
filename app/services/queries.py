@@ -5,8 +5,9 @@ from typing import Any
 
 import pandas as pd
 
-from app.core.algorithms import UFDS, knapsack_budget, knapsack_supply_budget
-from app.core.graphs import bidirectional_bfs_path, dijkstra_max_weight_path
+from app.core.algorithms import UFDS, knapsack_budget, knapsack_supply_budget, min_cost_flow_supply
+from app.core.geo import haversine_km
+from app.core.graphs import a_star_route, bidirectional_bfs_path, dijkstra_max_weight_path, tarjan_critical
 from app.core.semantic_search import SemanticSearchIndex
 from app.core.text import normalize_text, similarity
 from app.domain.schemas import QueryResponse
@@ -219,6 +220,171 @@ def client_supplier_path(dataset_id: str, client: str, supplier: str) -> QueryRe
     )
 
 
+def logistics_a_star(dataset_id: str, client: str, supplier: str) -> QueryResponse:
+    """A* logístico sobre la capa geográfica de G_business: ruta de menor
+    distancia cliente → proveedor usando la heurística de distancia recta."""
+    try:
+        nodes = read_csv(dataset_id, "logistics_nodes.csv")
+        edges = read_csv(dataset_id, "logistics_edges.csv")
+    except FileNotFoundError:
+        return QueryResponse(
+            ok=False,
+            error="A* logístico requiere un dataset sintético/logístico con coordenadas (lat/lon). El dataset actual no las tiene.",
+            algorithm="A* (heurística por distancia)",
+            metrics={"logistics_available": False},
+        )
+    if edges.empty or nodes.empty:
+        return QueryResponse(
+            ok=False,
+            error="La capa logística está vacía: se requieren coordenadas de clientes y proveedores.",
+            algorithm="A* (heurística por distancia)",
+            metrics={"logistics_available": False},
+        )
+    edges["km"] = pd.to_numeric(edges["km"], errors="coerce").fillna(0)
+    coords: dict[str, tuple[float, float]] = {}
+    labels: dict[str, str] = {}
+    for row in nodes.itertuples(index=False):
+        node_id = str(row.node_id)
+        try:
+            coords[node_id] = (float(row.lat), float(row.lon))
+        except (TypeError, ValueError):
+            continue
+        labels[node_id] = str(getattr(row, "label", node_id) or node_id)
+
+    start = _find_node(nodes, "CLIENT", client)
+    goal = _find_node(nodes, "SUPPLIER", supplier)
+    if not start or not goal:
+        return QueryResponse(
+            ok=False,
+            error="Cliente o proveedor sin coordenadas en la capa logística.",
+            algorithm="A* (heurística por distancia)",
+            metrics={"logistics_available": True},
+        )
+
+    result = a_star_route(edges, coords, start, goal)
+    if not result["ok"]:
+        return QueryResponse(
+            ok=False,
+            error="No existe ruta logística entre ese cliente y ese proveedor (no comparten cadena de productos).",
+            algorithm="A* (heurística por distancia)",
+            metrics={"logistics_available": True},
+        )
+
+    path = result["path"]
+    g_by_node = {step["node"]: step["g_km"] for step in result["visit_order"]}
+    lat_goal, lon_goal = coords[goal]
+    table = []
+    for index, node in enumerate(path):
+        lat, lon = coords[node]
+        table.append(
+            {
+                "step": index + 1,
+                "node": node,
+                "label": labels.get(node, node),
+                "lat": round(lat, 6),
+                "lon": round(lon, 6),
+                "g_km": g_by_node.get(node, 0.0),
+                "h_km": round(haversine_km(lat, lon, lat_goal, lon_goal), 3),
+            }
+        )
+    return QueryResponse(
+        answer=(
+            f"Ruta logística de {result['total_km']} km entre '{labels.get(start, client)}' y "
+            f"'{labels.get(goal, supplier)}' ({len(path)} paradas). A* expandió {result['expanded']} nodos "
+            f"frente a {result['baseline_expanded']} de Dijkstra sin heurística."
+        ),
+        algorithm="A* con costo real g(n)=km acumulados y heurística admisible h(n)=distancia recta al destino",
+        table=table,
+        metrics={
+            "total_km": result["total_km"],
+            "stops": len(path),
+            "expanded_a_star": result["expanded"],
+            "expanded_dijkstra": result["baseline_expanded"],
+            "logistics_available": True,
+        },
+        evidence={"dataset_id": dataset_id, "artifacts": ["logistics_nodes.csv", "logistics_edges.csv"], "graph": "G_business (overlay logístico)"},
+    )
+
+
+def critical_nodes(dataset_id: str, graph_type: str = "business", limit: int = 20) -> QueryResponse:
+    """Nodos críticos (puntos de articulación de Tarjan): productos/proveedores
+    puente cuya caída fragmenta la red comercial."""
+    gt = graph_type if graph_type in ("business", "sales", "purchases") else "business"
+    edges = read_csv(dataset_id, f"transaction_graph_{gt}_edges.csv")
+    nodes = read_csv(dataset_id, f"transaction_graph_{gt}_nodes.csv")
+    if edges.empty:
+        return QueryResponse(ok=False, error=f"G_{gt} no disponible.", algorithm="Tarjan (puntos de articulación)")
+    labels = {str(r.node_id): str(r.label) for r in nodes.itertuples(index=False)}
+    ntypes = {str(r.node_id): str(r.node_type) for r in nodes.itertuples(index=False)}
+    result = tarjan_critical(edges)
+    articulation = result["articulation"][:limit]
+    table = [
+        {
+            "rank": index + 1,
+            "node": item["node"],
+            "label": labels.get(item["node"], item["node"]),
+            "type": ntypes.get(item["node"], "OTHER"),
+            "fragments_created": item["fragments_created"],
+            "components_after_removal": item["components_after_removal"],
+        }
+        for index, item in enumerate(articulation)
+    ]
+    return QueryResponse(
+        ok=bool(table),
+        answer=(
+            f"Se encontraron {len(result['articulation'])} nodos críticos y {len(result['bridges'])} puentes en G_{gt}. "
+            "Su caída fragmenta la red comercial."
+            if result["articulation"]
+            else f"G_{gt} no tiene puntos de articulación: es 2-conexo (robusto ante la caída de un solo nodo)."
+        ),
+        algorithm=f"Tarjan (DFS low-link) sobre G_{gt}: puntos de articulación y puentes",
+        table=table,
+        metrics={
+            "critical_nodes": len(result["articulation"]),
+            "bridges": len(result["bridges"]),
+            "components_before": result["components_before"],
+            "nodes": result.get("node_count", 0),
+            "shown": len(table),
+        },
+        evidence={
+            "dataset_id": dataset_id,
+            "artifacts": [f"transaction_graph_{gt}_edges.csv", f"transaction_graph_{gt}_nodes.csv"],
+            "graph": f"G_{gt}",
+        },
+    )
+
+
+def min_cost_supply(dataset_id: str, items: list[dict]) -> QueryResponse:
+    """Min-cost flow: asigna la demanda por producto a proveedores minimizando
+    el costo total y respetando capacidades."""
+    try:
+        options = read_csv(dataset_id, "supply_options.csv")
+    except FileNotFoundError:
+        return QueryResponse(ok=False, error="No hay opciones de suministro (supply_options.csv).", algorithm="Min-cost flow")
+    for col in ["unit_cost", "capacity_units", "supplier_capacity"]:
+        if col in options.columns:
+            options[col] = pd.to_numeric(options[col], errors="coerce").fillna(0)
+    names = {str(r.product_id): str(getattr(r, "product_name", "")) for r in options.itertuples(index=False)} if "product_name" in options.columns else {}
+    result = min_cost_flow_supply(options, items)
+    table = [
+        {**row, "product_name": names.get(row["product_id"], "")}
+        for row in result["assignment"]
+    ]
+    return QueryResponse(
+        ok=result["ok"],
+        answer=(
+            f"Demanda de {result['demand_units']} unidades cubierta con {result['served_units']} "
+            f"(costo mínimo total S/{result['total_cost']}, {result.get('suppliers_used', 0)} proveedores)."
+            if result["ok"]
+            else "No se pudo asignar la demanda: sin capacidad o costo válido en las opciones."
+        ),
+        algorithm="Min-cost flow (caminos de costo mínimo sucesivos / SPFA): SOURCE→producto→proveedor→SINK",
+        table=table,
+        metrics={key: value for key, value in result.items() if key != "assignment"},
+        evidence={"dataset_id": dataset_id, "artifacts": ["supply_options.csv"], "graph": "flow"},
+    )
+
+
 def supplier_substitutes(dataset_id: str, supplier_id: str) -> QueryResponse:
     families = read_csv(dataset_id, "ufds_supplier_families.csv")
     projection = read_csv(dataset_id, "supplier_projection_edges.csv")
@@ -416,6 +582,13 @@ def graph_summary(dataset_id: str) -> dict:
         }
     except FileNotFoundError:
         pass
+    # Disponibilidad logística (A*) sin exponer un octavo grafo en la galería.
+    try:
+        logistics = read_json(dataset_id, "logistics_metrics.json")
+        result["logistics_available"] = bool(logistics.get("available"))
+        result["logistics"] = {"nodes": logistics.get("node_count", 0), "edges": logistics.get("edge_count", 0)}
+    except FileNotFoundError:
+        result["logistics_available"] = False
     result["node_type_breakdown"] = type_counts
     result["total_unique_nodes"] = sum(type_counts.values())
     return result

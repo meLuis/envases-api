@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Any
 
 import pandas as pd
@@ -219,6 +219,157 @@ def knapsack_supply_budget(options: pd.DataFrame, items: list[dict[str, Any]], b
         "total_cost": round(total_cost, 2),
         "budget_left": round(budget - total_cost, 2),
         "score": round(dp[capacity], 4),
+    }
+
+
+def min_cost_flow_supply(options: pd.DataFrame, demand: list[dict[str, Any]]) -> dict[str, Any]:
+    """Asignación de demanda a proveedores con costo y capacidad (Min-cost flow).
+
+    Red: SOURCE → producto (cap = demanda) → (producto, proveedor) (cap =
+    capacidad del proveedor para ese producto, costo = costo unitario) →
+    proveedor (cap = capacidad total del proveedor) → SINK. Resuelve con
+    caminos de costo mínimo sucesivos (SPFA/Bellman-Ford), garantizando el
+    costo total mínimo para el flujo servido. Respeta demanda y capacidad.
+    """
+    requested = {str(item["product_id"]): int(max(float(item.get("quantity", 0)), 0)) for item in demand}
+    requested = {pid: qty for pid, qty in requested.items() if qty > 0}
+    if options.empty or not requested:
+        return {"ok": False, "reason": "empty", "assignment": [], "total_cost": 0.0, "served_units": 0, "demand_units": sum(requested.values()), "unmet": []}
+
+    # Índice de nodos del grafo de flujo.
+    node_id: dict[str, int] = {}
+
+    def nid(name: str) -> int:
+        if name not in node_id:
+            node_id[name] = len(node_id)
+        return node_id[name]
+
+    SOURCE = nid("SOURCE")
+    SINK = nid("SINK")
+
+    # Aristas dirigidas como [to, capacity, cost, flow]; cada arista i tiene su
+    # inversa en i^1 (residual) para poder devolver flujo.
+    adj: dict[int, list[int]] = defaultdict(list)
+    edges: list[list[float]] = []
+
+    def add_edge(u: int, v: int, cap: float, cost: float) -> None:
+        adj[u].append(len(edges))
+        edges.append([v, cap, cost, 0.0])
+        adj[v].append(len(edges))
+        edges.append([u, 0.0, -cost, 0.0])
+
+    # SOURCE → producto (capacidad = demanda).
+    for pid, qty in requested.items():
+        add_edge(SOURCE, nid(f"P:{pid}"), float(qty), 0.0)
+
+    # producto → (producto, proveedor) con costo unitario; y proveedor → SINK
+    # con la capacidad total del proveedor.
+    supplier_cap: dict[str, float] = {}
+    for row in options.itertuples(index=False):
+        pid = str(getattr(row, "product_id", ""))
+        if pid not in requested:
+            continue
+        supplier = str(getattr(row, "supplier", "") or getattr(row, "supplier_id", ""))
+        cost = float(getattr(row, "unit_cost", 0) or 0)
+        cap = float(getattr(row, "capacity_units", 0) or 0)
+        if not supplier or cost <= 0 or cap <= 0:
+            continue
+        ps_node = nid(f"PS:{pid}:{supplier}")
+        add_edge(nid(f"P:{pid}"), ps_node, cap, cost)
+        add_edge(ps_node, nid(f"S:{supplier}"), cap, 0.0)
+        supplier_cap[supplier] = max(supplier_cap.get(supplier, 0.0), float(getattr(row, "supplier_capacity", 0) or 0) or cap)
+
+    for supplier, cap in supplier_cap.items():
+        add_edge(nid(f"S:{supplier}"), SINK, cap, 0.0)
+
+    total_nodes = len(node_id)
+
+    # Min-cost max-flow con SPFA (Bellman-Ford por cola) por camino aumentante.
+    def spfa() -> tuple[list[float], list[int]]:
+        dist = [float("inf")] * total_nodes
+        in_queue = [False] * total_nodes
+        prev_edge = [-1] * total_nodes
+        dist[SOURCE] = 0.0
+        queue = deque([SOURCE])
+        in_queue[SOURCE] = True
+        while queue:
+            u = queue.popleft()
+            in_queue[u] = False
+            for eidx in adj[u]:
+                v, cap, cost, flow = edges[eidx]
+                if cap - flow > 1e-9 and dist[u] + cost < dist[int(v)] - 1e-12:
+                    dist[int(v)] = dist[u] + cost
+                    prev_edge[int(v)] = eidx
+                    if not in_queue[int(v)]:
+                        queue.append(int(v))
+                        in_queue[int(v)] = True
+        return dist, prev_edge
+
+    total_cost = 0.0
+    served = 0.0
+    while True:
+        dist, prev_edge = spfa()
+        if dist[SINK] == float("inf"):
+            break
+        # Cuello de botella del camino.
+        bottleneck = float("inf")
+        v = SINK
+        while v != SOURCE:
+            eidx = prev_edge[v]
+            cap, flow = edges[eidx][1], edges[eidx][3]
+            bottleneck = min(bottleneck, cap - flow)
+            v = edges[eidx ^ 1][0]
+            v = int(v)
+        v = SINK
+        while v != SOURCE:
+            eidx = prev_edge[v]
+            edges[eidx][3] += bottleneck
+            edges[eidx ^ 1][3] -= bottleneck
+            v = int(edges[eidx ^ 1][0])
+        served += bottleneck
+        total_cost += bottleneck * dist[SINK]
+
+    # Reconstruir asignación: aristas dirigidas producto→PS con flujo positivo.
+    assignment = []
+    rev_index = {v: k for k, v in node_id.items()}
+    for eidx in range(0, len(edges), 2):
+        v, cap, cost, flow = edges[eidx]
+        if flow <= 1e-9:
+            continue
+        u = int(edges[eidx ^ 1][0])
+        u_name = rev_index.get(u, "")
+        v_name = rev_index.get(int(v), "")
+        if u_name.startswith("P:") and v_name.startswith("PS:"):
+            _, pid, supplier = v_name.split(":", 2)
+            assignment.append(
+                {
+                    "product_id": pid,
+                    "supplier": supplier,
+                    "units": round(flow, 2),
+                    "unit_cost": round(cost, 4),
+                    "line_cost": round(flow * cost, 2),
+                }
+            )
+    assignment.sort(key=lambda item: (item["product_id"], item["line_cost"]))
+
+    served_by_product: dict[str, float] = defaultdict(float)
+    for item in assignment:
+        served_by_product[item["product_id"]] += item["units"]
+    unmet = [
+        {"product_id": pid, "requested": qty, "served": int(served_by_product.get(pid, 0)), "shortfall": int(qty - served_by_product.get(pid, 0))}
+        for pid, qty in requested.items()
+        if served_by_product.get(pid, 0) < qty
+    ]
+
+    return {
+        "ok": bool(assignment),
+        "reason": "ok" if assignment else "infeasible",
+        "assignment": assignment,
+        "total_cost": round(total_cost, 2),
+        "served_units": int(round(served)),
+        "demand_units": sum(requested.values()),
+        "unmet": unmet,
+        "suppliers_used": len({item["supplier"] for item in assignment}),
     }
 
 

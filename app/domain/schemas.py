@@ -42,3 +42,12 @@ class BudgetRequest(BaseModel):
     budget: float
     items: list[BudgetItem]
 
+
+class DemandItem(BaseModel):
+    product_id: str
+    quantity: float = 1.0
+
+
+class MinCostFlowRequest(BaseModel):
+    items: list[DemandItem]
+
