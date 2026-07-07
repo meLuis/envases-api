@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ArtifactStatus(BaseModel):
@@ -39,6 +39,19 @@ class BudgetItem(BaseModel):
 
 
 class BudgetRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "budget": 7500,
+                "items": [
+                    {"product_id": "10001", "quantity": 4000},
+                    {"product_id": "10002", "quantity": 2000},
+                    {"product_id": "10003", "quantity": 1000},
+                ],
+            }
+        }
+    )
+
     budget: float
     items: list[BudgetItem]
 
