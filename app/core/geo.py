@@ -11,10 +11,8 @@ EARTH_RADIUS_KM = 6371.0088
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Distancia en línea recta (gran círculo) entre dos coordenadas, en km.
 
-    Es la base geométrica del A* logístico: como una recta nunca es más larga
-    que un camino real, sirve de heurística admisible h(n) = distancia recta al
-    destino (nunca sobreestima el costo restante), garantizando que A* devuelva
-    la ruta óptima.
+    Se usa para ponderar distancias geograficas aproximadas entre entidades y
+    puntos de ruta dentro de la capa logistica.
     """
     lat1_r, lon1_r, lat2_r, lon2_r = map(radians, (lat1, lon1, lat2, lon2))
     d_lat = lat2_r - lat1_r

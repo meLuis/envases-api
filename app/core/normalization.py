@@ -160,11 +160,11 @@ def normalize_transactions(frame: pd.DataFrame, mapping: dict[str, Any], kind: s
 
 
 def entity_coordinates(cleaned: dict[str, pd.DataFrame]) -> dict[str, tuple[float, float]]:
-    """Coordenadas por nodo de negocio (CLIENT:… / SUPPLIER:…) para el A* logístico.
+    """Coordenadas por nodo de negocio (CLIENT:… / SUPPLIER:…) para la capa logistica.
 
     Toma la primera coordenada válida de cada entidad en ventas (clientes) y
     compras (proveedores). Devuelve {} si el dataset no trae lat/lon (dataset
-    real): en ese caso A* responde con el mensaje "requiere dataset sintético".
+    real): en ese caso no se genera la capa logistica.
     """
     coords: dict[str, tuple[float, float]] = {}
     for kind, prefix in (("sales", "CLIENT"), ("purchases", "SUPPLIER")):

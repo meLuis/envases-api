@@ -344,7 +344,7 @@ def bidirectional_bfs_path(edges: pd.DataFrame, start: str, goal: str) -> list[s
 
 
 # ============================================================================
-# OVERLAY LOGÍSTICO (para A*) — no es un grafo nuevo de la galería, es una capa
+# OVERLAY LOGÍSTICO — no es un grafo nuevo de la galería, es una capa
 # geográfica sobre G_business: conecta entidades (clientes/proveedores) que
 # comparten producto y pesa cada arista con la distancia real en km.
 # ============================================================================
@@ -357,8 +357,7 @@ def build_logistics_overlay(
     entidades que comparten al menos un producto, ponderadas por distancia (km).
 
     Devuelve (nodes_df, edges_df, metrics). Si no hay coordenadas suficientes,
-    devuelve estructuras vacías: A* responderá con el mensaje didáctico de
-    "requiere dataset sintético/logístico".
+    devuelve estructuras vacías.
     """
     if business_edges.empty or not coords:
         return pd.DataFrame(), pd.DataFrame(), {"graph_name": "logistics_overlay", "available": False, "node_count": 0, "edge_count": 0}
@@ -390,7 +389,7 @@ def build_logistics_overlay(
         ring = 1 + (i % 6)
         spoke = i % 12
         # Ramales hacia el este/noreste: son cortos desde Pucallpa, pero no
-        # acercan a Lima. Dijkstra los visita por bajo g(n); A* los evita por h(n).
+        # acercan a Lima. Sirven para que la capa tenga rutas alternativas.
         lat = -7.95 + 0.055 * ring + 0.018 * (spoke % 4)
         lon = -73.75 + 0.085 * ring + 0.022 * (spoke // 4)
         route_nodes[f"RUTA:SELVA_RAMAL_{i:02d}"] = {
@@ -529,132 +528,6 @@ def build_logistics_overlay(
         ],
     }
     return nodes, edges, metrics
-
-
-def a_star_route(
-    edges: pd.DataFrame,
-    coords: dict[str, tuple[float, float]],
-    start: str,
-    goal: str,
-    weight_col: str = "km",
-) -> dict[str, Any]:
-    """A* sobre la capa logística: g(n) = km reales acumulados, h(n) = distancia
-    recta al destino (admisible ⇒ ruta óptima). Devuelve la ruta, el costo total
-    y, para la didáctica, cuántos nodos expandió frente a Dijkstra (h=0)."""
-    adjacency: dict[str, list[tuple[str, float, dict[str, Any]]]] = defaultdict(list)
-    for row in edges.itertuples(index=False):
-        s, t = str(row.source), str(row.target)
-        w = float(getattr(row, weight_col, 0) or 0)
-        meta = {
-            "edge_type": str(getattr(row, "edge_type", "") or ""),
-            "road_name": str(getattr(row, "road_name", "") or ""),
-        }
-        adjacency[s].append((t, w, meta))
-        adjacency[t].append((s, w, meta))
-
-    if start not in coords or goal not in coords or start not in adjacency:
-        return {"ok": False, "reason": "endpoint_missing", "path": [], "total_km": 0.0}
-
-    lat_goal, lon_goal = coords[goal]
-
-    def heuristic(node: str) -> float:
-        if node not in coords:
-            return 0.0
-        lat, lon = coords[node]
-        return haversine_km(lat, lon, lat_goal, lon_goal)
-
-    def search(use_heuristic: bool) -> tuple[list[str], float, int, list[dict[str, Any]]]:
-        g_score: dict[str, float] = {start: 0.0}
-        prev: dict[str, str | None] = {start: None}
-        heap: list[tuple[float, float, str]] = [(heuristic(start) if use_heuristic else 0.0, 0.0, start)]
-        expanded = 0
-        order: list[dict[str, Any]] = []
-        closed: set[str] = set()
-
-        def frontier_snapshot(limit: int = 8) -> list[dict[str, Any]]:
-            candidates = []
-            for candidate, candidate_g in g_score.items():
-                if candidate in closed:
-                    continue
-                candidate_h = heuristic(candidate) if use_heuristic else 0.0
-                candidates.append(
-                    {
-                        "node": candidate,
-                        "g_km": round(candidate_g, 4),
-                        "h_km": round(candidate_h, 4),
-                        "f_km": round(candidate_g + candidate_h, 4),
-                    }
-                )
-            candidates.sort(key=lambda item: (item["f_km"], item["h_km"], item["node"]))
-            return candidates[:limit]
-
-        while heap:
-            f, g, node = heapq.heappop(heap)
-            if node in closed:
-                continue
-            closed.add(node)
-            expanded += 1
-            expanded_item = {
-                "step": expanded,
-                "node": node,
-                "g_km": round(g, 4),
-                "h_km": round(heuristic(node), 4) if use_heuristic else 0.0,
-                "f_km": round(f, 4),
-                "neighbors": [],
-                "frontier": [],
-            }
-            if node == goal:
-                expanded_item["frontier"] = frontier_snapshot()
-                order.append(expanded_item)
-                path: list[str] = []
-                cur: str | None = node
-                while cur is not None:
-                    path.append(cur)
-                    cur = prev.get(cur)
-                path.reverse()
-                return path, round(g, 4), expanded, order
-            for neighbor, w, meta in adjacency.get(node, []):
-                if neighbor in closed:
-                    continue
-                tentative = g + w
-                neighbor_h = heuristic(neighbor) if use_heuristic else 0.0
-                neighbor_f = tentative + neighbor_h
-                improved = tentative < g_score.get(neighbor, float("inf"))
-                expanded_item["neighbors"].append(
-                    {
-                        "node": neighbor,
-                        "edge_km": round(w, 4),
-                        "g_km": round(tentative, 4),
-                        "h_km": round(neighbor_h, 4),
-                        "f_km": round(neighbor_f, 4),
-                        "improved": improved,
-                        "edge_type": meta.get("edge_type", ""),
-                        "road_name": meta.get("road_name", ""),
-                    }
-                )
-                if tentative < g_score.get(neighbor, float("inf")):
-                    g_score[neighbor] = tentative
-                    prev[neighbor] = node
-                    priority = neighbor_f
-                    heapq.heappush(heap, (priority, tentative, neighbor))
-            expanded_item["neighbors"].sort(key=lambda item: (item["f_km"], item["h_km"], item["node"]))
-            expanded_item["neighbors"] = expanded_item["neighbors"][:8]
-            expanded_item["frontier"] = frontier_snapshot()
-            order.append(expanded_item)
-        return [], 0.0, expanded, order
-
-    path, total_km, expanded, order = search(use_heuristic=True)
-    _, _, baseline_expanded, baseline_order = search(use_heuristic=False)
-    return {
-        "ok": bool(path),
-        "reason": "ok" if path else "no_path",
-        "path": path,
-        "total_km": total_km,
-        "expanded": expanded,
-        "baseline_expanded": baseline_expanded,
-        "visit_order": order,
-        "baseline_visit_order": baseline_order,
-    }
 
 
 def _transaction_graph(frame: pd.DataFrame, entity_type: str, graph_name: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:

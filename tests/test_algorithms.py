@@ -9,7 +9,7 @@ from app.core.algorithms import (
     knapsack_supply_budget,
     min_cost_flow_supply,
 )
-from app.core.graphs import a_star_route, bidirectional_bfs_path
+from app.core.graphs import bidirectional_bfs_path
 
 
 def test_ufds_groups_projection_edges() -> None:
@@ -93,27 +93,6 @@ def test_knapsack_respects_budget() -> None:
     assert result["total_cost"] <= 20.0
     assert result["total_units"] > 0
     assert result["budget_left"] >= 0
-
-
-def test_a_star_picks_lower_cost_route_with_admissible_heuristic() -> None:
-    # A → C directo (25 km) vs A → B → C (1.5 + 18 = 19.5 km). Con h(n) admisible
-    # (distancia recta al destino) A* debe devolver la ruta de menor costo total.
-    coords = {
-        "CLIENT:A": (-12.05, -77.05),
-        "SUPPLIER:B": (-12.06, -77.04),
-        "SUPPLIER:C": (-12.20, -76.90),
-    }
-    edges = pd.DataFrame(
-        [
-            {"source": "CLIENT:A", "target": "SUPPLIER:B", "km": 1.5},
-            {"source": "SUPPLIER:B", "target": "SUPPLIER:C", "km": 18.0},
-            {"source": "CLIENT:A", "target": "SUPPLIER:C", "km": 25.0},
-        ]
-    )
-    result = a_star_route(edges, coords, "CLIENT:A", "SUPPLIER:C")
-    assert result["ok"]
-    assert result["path"] == ["CLIENT:A", "SUPPLIER:B", "SUPPLIER:C"]
-    assert result["total_km"] == 19.5
 
 
 def test_min_cost_flow_respects_capacity_and_minimizes_cost() -> None:

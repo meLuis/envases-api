@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any
-
 import pandas as pd
 
 from app.core.algorithms import UFDS, knapsack_budget, knapsack_supply_budget, min_cost_flow_supply
-from app.core.geo import haversine_km
-from app.core.graphs import a_star_route, bidirectional_bfs_path, dijkstra_max_weight_path
+from app.core.graphs import bidirectional_bfs_path, dijkstra_max_weight_path
 from app.core.semantic_search import SemanticSearchIndex
 from app.core.text import normalize_text, similarity
 from app.domain.schemas import QueryResponse
@@ -217,177 +214,6 @@ def client_supplier_path(dataset_id: str, client: str, supplier: str) -> QueryRe
         table=[{"step": index + 1, "node": node, "label": _label(nodes, node)} for index, node in enumerate(path)],
         metrics={"path_length": max(len(path) - 1, 0), "nodes_in_path": len(path)},
         evidence={"dataset_id": dataset_id, "artifacts": ["transaction_graph_business_edges.csv"], "graph": "G_business"},
-    )
-
-
-def logistics_a_star(dataset_id: str, client: str, supplier: str) -> QueryResponse:
-    """A* logístico sobre la capa geográfica de G_business: ruta de menor
-    distancia cliente → proveedor usando la heurística de distancia recta."""
-    try:
-        nodes = read_csv(dataset_id, "logistics_nodes.csv")
-        edges = read_csv(dataset_id, "logistics_edges.csv")
-        logistics_metrics = read_json(dataset_id, "logistics_metrics.json")
-    except FileNotFoundError:
-        return QueryResponse(
-            ok=False,
-            error="A* logístico requiere un dataset sintético/logístico con coordenadas (lat/lon). El dataset actual no las tiene.",
-            algorithm="A* (heurística por distancia)",
-            metrics={"logistics_available": False},
-        )
-    if edges.empty or nodes.empty:
-        return QueryResponse(
-            ok=False,
-            error="La capa logística está vacía: se requieren coordenadas de clientes y proveedores.",
-            algorithm="A* (heurística por distancia)",
-            metrics={"logistics_available": False},
-        )
-    edges["km"] = pd.to_numeric(edges["km"], errors="coerce").fillna(0)
-    coords: dict[str, tuple[float, float]] = {}
-    labels: dict[str, str] = {}
-    for row in nodes.itertuples(index=False):
-        node_id = str(row.node_id)
-        try:
-            coords[node_id] = (float(row.lat), float(row.lon))
-        except (TypeError, ValueError):
-            continue
-        labels[node_id] = str(getattr(row, "label", node_id) or node_id)
-
-    start = _find_node(nodes, "CLIENT", client)
-    goal = _find_node(nodes, "SUPPLIER", supplier)
-    if not start or not goal:
-        return QueryResponse(
-            ok=False,
-            error="Cliente o proveedor sin coordenadas en la capa logística.",
-            algorithm="A* (heurística por distancia)",
-            metrics={"logistics_available": True},
-        )
-
-    result = a_star_route(edges, coords, start, goal)
-    if not result["ok"]:
-        return QueryResponse(
-            ok=False,
-            error="No existe ruta logistica entre ese cliente y ese proveedor en la red vial sintetica.",
-            algorithm="A* (heurística por distancia)",
-            metrics={"logistics_available": True},
-        )
-
-    path = result["path"]
-    g_by_node = {step["node"]: step["g_km"] for step in result["visit_order"]}
-    lat_goal, lon_goal = coords[goal]
-
-    def enrich_trace(items: list[dict[str, Any]], limit: int | None = None) -> list[dict[str, Any]]:
-        out = []
-        selected = items if limit is None else items[:limit]
-        for item in selected:
-            node = str(item.get("node", ""))
-            lat, lon = coords.get(node, (0.0, 0.0))
-
-            def enrich_node(candidate: dict[str, Any]) -> dict[str, Any]:
-                candidate_node = str(candidate.get("node", ""))
-                candidate_lat, candidate_lon = coords.get(candidate_node, (0.0, 0.0))
-                return {
-                    **candidate,
-                    "label": labels.get(candidate_node, candidate_node),
-                    "lat": round(candidate_lat, 6),
-                    "lon": round(candidate_lon, 6),
-                }
-
-            out.append(
-                {
-                    **item,
-                    "label": labels.get(node, node),
-                    "lat": round(lat, 6),
-                    "lon": round(lon, 6),
-                    "neighbors": [enrich_node(n) for n in item.get("neighbors", [])],
-                    "frontier": [enrich_node(n) for n in item.get("frontier", [])],
-                }
-            )
-        return out
-
-    def map_nodes() -> list[dict[str, Any]]:
-        route_types = {"HUB", "ROUTE"}
-        important = set(path)
-        for item in result["visit_order"][:80]:
-            important.add(str(item.get("node", "")))
-            important.update(str(n.get("node", "")) for n in item.get("frontier", []))
-            important.update(str(n.get("node", "")) for n in item.get("neighbors", []))
-        rows = []
-        for row in nodes.itertuples(index=False):
-            node_id = str(row.node_id)
-            node_type = str(getattr(row, "node_type", "") or "")
-            if node_type not in route_types and node_id not in important:
-                continue
-            rows.append(
-                {
-                    "node": node_id,
-                    "label": labels.get(node_id, node_id),
-                    "type": node_type,
-                    "lat": round(float(getattr(row, "lat", 0) or 0), 6),
-                    "lon": round(float(getattr(row, "lon", 0) or 0), 6),
-                    "zone": str(getattr(row, "zone", "") or ""),
-                }
-            )
-        return rows
-
-    def map_edges() -> list[dict[str, Any]]:
-        path_pairs = {tuple(sorted((path[i - 1], path[i]))) for i in range(1, len(path))}
-        rows = []
-        for row in edges.itertuples(index=False):
-            source = str(row.source)
-            target = str(row.target)
-            edge_type = str(getattr(row, "edge_type", "") or "")
-            include = edge_type != "access" or tuple(sorted((source, target))) in path_pairs
-            if not include:
-                continue
-            rows.append(
-                {
-                    "source": source,
-                    "target": target,
-                    "km": round(float(getattr(row, "km", 0) or 0), 4),
-                    "type": edge_type,
-                    "road": str(getattr(row, "road_name", "") or ""),
-                }
-            )
-        return rows
-
-    table = []
-    for index, node in enumerate(path):
-        lat, lon = coords[node]
-        table.append(
-            {
-                "step": index + 1,
-                "node": node,
-                "label": labels.get(node, node),
-                "lat": round(lat, 6),
-                "lon": round(lon, 6),
-                "g_km": g_by_node.get(node, 0.0),
-                "h_km": round(haversine_km(lat, lon, lat_goal, lon_goal), 3),
-            }
-        )
-    return QueryResponse(
-        answer=(
-            f"Ruta logística de {result['total_km']} km entre '{labels.get(start, client)}' y "
-            f"'{labels.get(goal, supplier)}' ({len(path)} paradas). A* expandió {result['expanded']} nodos "
-            f"frente a {result['baseline_expanded']} de Dijkstra sin heurística."
-        ),
-        algorithm="A* con costo real g(n)=km acumulados y heurística admisible h(n)=distancia recta al destino",
-        table=table,
-        metrics={
-            "total_km": result["total_km"],
-            "stops": len(path),
-            "expanded_a_star": result["expanded"],
-            "expanded_dijkstra": result["baseline_expanded"],
-            "question_answered": "Ruta de menor distancia entre cliente y proveedor en la red logistica.",
-            "business_use": "Planificar el corredor de entrega/recojo y mostrar cuanta exploracion evita la heuristica de A*.",
-            "logistics_available": True,
-            "astar_trace": enrich_trace(result["visit_order"]),
-            "dijkstra_trace": enrich_trace(result["baseline_visit_order"], limit=120),
-            "map_nodes": map_nodes(),
-            "map_edges": map_edges(),
-            "obstacles": logistics_metrics.get("obstacles", []),
-            "logistics_model": logistics_metrics.get("model", "geographic_overlay"),
-        },
-        evidence={"dataset_id": dataset_id, "artifacts": ["logistics_nodes.csv", "logistics_edges.csv"], "graph": "G_business (overlay logístico)"},
     )
 
 
@@ -679,7 +505,7 @@ def graph_summary(dataset_id: str) -> dict:
         }
     except FileNotFoundError:
         pass
-    # Disponibilidad logística (A*) sin exponer un octavo grafo en la galería.
+    # Disponibilidad de la capa logistica sin exponer otro grafo en la galeria.
     try:
         logistics = read_json(dataset_id, "logistics_metrics.json")
         result["logistics_available"] = bool(logistics.get("available"))

@@ -113,7 +113,7 @@ def _write_synthetic(base: Path) -> None:
     pd.DataFrame(purchase_rows).to_csv(base / "compras.csv", index=False, encoding="utf-8-sig")
 
 
-def test_synthetic_pipeline_generates_logistics_and_runs_all(tmp_path: Path) -> None:
+def test_synthetic_pipeline_generates_graphs_and_runs_optimizers(tmp_path: Path) -> None:
     _write_synthetic(tmp_path)
     summary = build_dataset_from_paths(
         tmp_path / "productos.csv",
@@ -130,11 +130,6 @@ def test_synthetic_pipeline_generates_logistics_and_runs_all(tmp_path: Path) -> 
     gs = queries.graph_summary(dataset_id)
     assert gs["logistics_available"] is True
 
-    # A* logístico: cliente ↔ proveedor que comparten catálogo (frasco 1001).
-    a_star = queries.logistics_a_star(dataset_id, "COSMETICOS DEL SUR SAC", "ENVASES LIMA SAC")
-    assert a_star.ok
-    assert len(a_star.table) >= 2
-    assert a_star.metrics["total_km"] > 0
 
     # Min-cost flow: demanda de un producto que varios proveedores cubren.
     mcf = queries.min_cost_supply(dataset_id, [{"product_id": "1002", "quantity": 60}])
@@ -148,7 +143,3 @@ def test_legacy_dataset_without_coords_skips_logistics() -> None:
     summary = build_dataset_from_paths(base / "productos.csv", base / "ventas.csv", base / "compras.csv")
     generated = {item.name for item in summary.generated}
     assert "logistics_edges.csv" not in generated
-    # A* debe responder con el aviso didáctico, no romper.
-    a_star = queries.logistics_a_star(summary.dataset_id, "cualquiera", "cualquiera")
-    assert a_star.ok is False
-    assert a_star.metrics.get("logistics_available") is False

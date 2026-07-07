@@ -131,11 +131,6 @@ def weighted_path(dataset_id: str, source: str, target: str, graph_type: str = "
     return _query(lambda: queries.weighted_connection(dataset_id, source, target, graph_type))
 
 
-@router.get("/datasets/{dataset_id}/paths/logistics-a-star", response_model=QueryResponse)
-def logistics_a_star(dataset_id: str, client: str, supplier: str) -> QueryResponse:
-    return _query(lambda: queries.logistics_a_star(dataset_id, client, supplier))
-
-
 @router.post("/datasets/{dataset_id}/supply/min-cost-flow", response_model=QueryResponse)
 def min_cost_flow(dataset_id: str, body: MinCostFlowRequest) -> QueryResponse:
     items = [item.model_dump() for item in body.items]

@@ -152,8 +152,8 @@ def _build_dataset(dataset_id: str, raw: dict[str, pd.DataFrame]) -> DatasetSumm
                 ]
             )
 
-        # Overlay logístico (A*): capa geográfica sobre G_business. Solo se genera
-        # si el dataset trae coordenadas; si no, A* devuelve el aviso didáctico.
+        # Overlay logístico: capa geográfica sobre G_business. Solo se genera
+        # si el dataset trae coordenadas.
         business_nodes, business_edges, _ = graphs["business"]
         coords = entity_coordinates(cleaned)
         logistics_nodes, logistics_edges, logistics_metrics = build_logistics_overlay(
@@ -173,7 +173,7 @@ def _build_dataset(dataset_id: str, raw: dict[str, pd.DataFrame]) -> DatasetSumm
                     name="logistics_overlay",
                     kind="graph",
                     generated=False,
-                    reason="Sin coordenadas lat/lon en ventas/compras: A* requiere dataset sintético/logístico.",
+                    reason="Sin coordenadas lat/lon en ventas/compras: no se genero la capa logistica.",
                 )
             )
 
@@ -295,7 +295,6 @@ def _company_rules() -> dict:
         "llm": "enabled_gemini" if gemini_available() else "disabled",
         "main_algorithms": [
             "BFS bidireccional",
-            "A* logistico",
             "Bellman-Ford",
             "Kruskal + UFDS",
             "Programacion dinamica (Knapsack)",
