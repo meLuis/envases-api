@@ -1,0 +1,29 @@
+INFO:     127.0.0.1:65473 - "POST /datasets/1eedc5edd445/budget/optimize HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65475 - "POST /datasets/a4650049ae14/budget/optimize HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65477 - "POST /datasets/27348891f952/budget/optimize HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54230 - "GET /datasets/1eedc5edd445/graph/summary HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54230 - "GET /datasets/1eedc5edd445/artifacts/transaction_graph_business_nodes.csv HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60909 - "OPTIONS /datasets/1eedc5edd445/budget/optimize HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60909 - "POST /datasets/1eedc5edd445/budget/optimize HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61153 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61155 - "GET /api/health HTTP/1.1" 404 Not Found
+ INFO:     127.0.0.1:61984 - "GET /datasets HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61986 - "GET /datasets/1eedc5edd445/graph/summary HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63495 - "GET /datasets/a4650049ae14/graph/summary HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63497 - "GET /datasets/72dd9db6be4e/graph/summary HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63502 - "GET /datasets/27348891f952/graph/summary HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51077 - "GET /datasets/a264a611d60c/graph/summary HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51079 - "GET /datasets/a1cc7740aec3/graph/summary HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51087 - "GET /datasets/a4650049ae14/artifacts HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51089 - "GET /datasets/a4650049ae14/artifacts/transaction_graph_business_nodes.csv HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51356 - "GET /datasets/a4650049ae14/paths/client-to-supplier?client=CLIENT%3aVALERIA+SAAVEDRA+DERMOCOSMETICA+PUEBLO+LIBRE&supplier=SUPPLIER%3aFRASCOS+COMAS+SAC HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54876 - "GET /datasets/a4650049ae14/paths/client-to-supplier?client=VALERIA+SAAVEDRA&supplier=FRASCOS+COMAS HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64054 - "GET /datasets/a4650049ae14/products/search?q=FRASCO&limit=5 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64056 - "GET /datasets/a4650049ae14/paths/logistics-a-star?client=VALERIA+SAAVEDRA&supplier=FRASCOS+COMAS HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58492 - "POST /datasets/27348891f952/budget/optimize HTTP/1.1" 200 OK
+ INFO:     127.0.0.1:64259 - "POST /datasets/27348891f952/budget/optimize HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53393 - "POST /datasets/1eedc5edd445/budget/optimize HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51057 - "GET /datasets/1eedc5edd445/graph/summary HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51057 - "GET /datasets/1eedc5edd445/artifacts/transaction_graph_business_nodes.csv HTTP/1.1" 200 OK
+ INFO:     127.0.0.1:55052 - "POST /datasets/1eedc5edd445/budget/optimize HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55059 - "POST /datasets/1eedc5edd445/budget/optimize HTTP/1.1" 200 OK

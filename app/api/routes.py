@@ -136,11 +136,6 @@ def logistics_a_star(dataset_id: str, client: str, supplier: str) -> QueryRespon
     return _query(lambda: queries.logistics_a_star(dataset_id, client, supplier))
 
 
-@router.get("/datasets/{dataset_id}/network/critical-nodes", response_model=QueryResponse)
-def critical_nodes(dataset_id: str, graph_type: str = "business", limit: int = 20) -> QueryResponse:
-    return _query(lambda: queries.critical_nodes(dataset_id, graph_type, limit))
-
-
 @router.post("/datasets/{dataset_id}/supply/min-cost-flow", response_model=QueryResponse)
 def min_cost_flow(dataset_id: str, body: MinCostFlowRequest) -> QueryResponse:
     items = [item.model_dump() for item in body.items]

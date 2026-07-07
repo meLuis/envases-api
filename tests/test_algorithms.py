@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.core.algorithms import UFDS, families_from_projection, min_cost_flow_supply
-from app.core.graphs import a_star_route, tarjan_critical
+from app.core.algorithms import (
+    UFDS,
+    bellman_ford_savings,
+    families_from_projection,
+    knapsack_supply_budget,
+    min_cost_flow_supply,
+)
+from app.core.graphs import a_star_route, bidirectional_bfs_path
 
 
 def test_ufds_groups_projection_edges() -> None:
@@ -37,6 +43,58 @@ def test_ufds_kruskal_skips_cycle_edges() -> None:
     assert len({uf.find(n) for n in ("A", "B", "C")}) == 1
 
 
+def test_bidirectional_bfs_finds_client_to_supplier_path() -> None:
+    # Cadena CLIENT:A — PRODUCT:P — SUPPLIER:S. El BFS bidireccional (dos frentes)
+    # debe reconstruir el camino completo entre cliente y proveedor.
+    edges = pd.DataFrame(
+        [
+            {"source": "CLIENT:A", "target": "PRODUCT:P"},
+            {"source": "SUPPLIER:S", "target": "PRODUCT:P"},
+        ]
+    )
+    path = bidirectional_bfs_path(edges, "CLIENT:A", "SUPPLIER:S")
+    assert path == ["CLIENT:A", "PRODUCT:P", "SUPPLIER:S"]
+
+
+def test_bellman_ford_marks_savings_as_negative_edges() -> None:
+    # Un producto ofertado por 4 proveedores: costos 2.00 / 2.40 / 1.60 / 1.80.
+    # La mediana es 1.90, así que 1.60 y 1.80 quedan por debajo → son ahorros
+    # (aristas negativas). El mejor camino debe ser el proveedor más barato (1.60).
+    options = pd.DataFrame(
+        [
+            {"product_id": "P1", "product_name": "Frasco", "supplier_id": "S1", "supplier": "Prov 1", "unit_cost": 2.00},
+            {"product_id": "P1", "product_name": "Frasco", "supplier_id": "S2", "supplier": "Prov 2", "unit_cost": 2.40},
+            {"product_id": "P1", "product_name": "Frasco", "supplier_id": "S3", "supplier": "Prov 3", "unit_cost": 1.60},
+            {"product_id": "P1", "product_name": "Frasco", "supplier_id": "S4", "supplier": "Prov 4", "unit_cost": 1.80},
+        ]
+    )
+    result = bellman_ford_savings(options)
+    assert result["summary"]["negative_edges"] == 2
+    best = result["best_paths"]
+    assert not best.empty
+    assert str(best.iloc[0]["supplier"]) == "Prov 3"
+    assert float(best.iloc[0]["unit_cost"]) == 1.60
+
+
+def test_knapsack_respects_budget() -> None:
+    # Knapsack 0/1 sobre lotes proveedor-producto: nunca debe exceder el presupuesto
+    # y debe elegir dentro de la capacidad disponible.
+    options = pd.DataFrame(
+        [
+            {"product_id": "P1", "supplier": "Prov 1", "unit_cost": 2.0, "capacity_units": 10, "supplier_capacity": 10},
+            {"product_id": "P2", "supplier": "Prov 2", "unit_cost": 5.0, "capacity_units": 10, "supplier_capacity": 10},
+        ]
+    )
+    items = [
+        {"product_id": "P1", "quantity": 5, "value": 5},
+        {"product_id": "P2", "quantity": 5, "value": 5},
+    ]
+    result = knapsack_supply_budget(options, items, budget=20.0)
+    assert result["total_cost"] <= 20.0
+    assert result["total_units"] > 0
+    assert result["budget_left"] >= 0
+
+
 def test_a_star_picks_lower_cost_route_with_admissible_heuristic() -> None:
     # A → C directo (25 km) vs A → B → C (1.5 + 18 = 19.5 km). Con h(n) admisible
     # (distancia recta al destino) A* debe devolver la ruta de menor costo total.
@@ -56,29 +114,6 @@ def test_a_star_picks_lower_cost_route_with_admissible_heuristic() -> None:
     assert result["ok"]
     assert result["path"] == ["CLIENT:A", "SUPPLIER:B", "SUPPLIER:C"]
     assert result["total_km"] == 19.5
-
-
-def test_tarjan_detects_seeded_bridge_node() -> None:
-    # Dos triangulos (a-b-c) y (d-e-f) unidos por el nodo X: X es puente cuya
-    # caida fragmenta la red en dos componentes.
-    edges = pd.DataFrame(
-        [
-            {"source": "a", "target": "b"},
-            {"source": "b", "target": "c"},
-            {"source": "c", "target": "a"},
-            {"source": "c", "target": "X"},
-            {"source": "X", "target": "d"},
-            {"source": "d", "target": "e"},
-            {"source": "e", "target": "f"},
-            {"source": "f", "target": "d"},
-        ]
-    )
-    result = tarjan_critical(edges)
-    critical = {item["node"] for item in result["articulation"]}
-    assert "X" in critical
-    # Al remover X quedan al menos 2 componentes.
-    x_impact = next(item for item in result["articulation"] if item["node"] == "X")
-    assert x_impact["components_after_removal"] >= 2
 
 
 def test_min_cost_flow_respects_capacity_and_minimizes_cost() -> None:

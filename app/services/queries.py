@@ -7,7 +7,7 @@ import pandas as pd
 
 from app.core.algorithms import UFDS, knapsack_budget, knapsack_supply_budget, min_cost_flow_supply
 from app.core.geo import haversine_km
-from app.core.graphs import a_star_route, bidirectional_bfs_path, dijkstra_max_weight_path, tarjan_critical
+from app.core.graphs import a_star_route, bidirectional_bfs_path, dijkstra_max_weight_path
 from app.core.semantic_search import SemanticSearchIndex
 from app.core.text import normalize_text, similarity
 from app.domain.schemas import QueryResponse
@@ -226,6 +226,7 @@ def logistics_a_star(dataset_id: str, client: str, supplier: str) -> QueryRespon
     try:
         nodes = read_csv(dataset_id, "logistics_nodes.csv")
         edges = read_csv(dataset_id, "logistics_edges.csv")
+        logistics_metrics = read_json(dataset_id, "logistics_metrics.json")
     except FileNotFoundError:
         return QueryResponse(
             ok=False,
@@ -265,7 +266,7 @@ def logistics_a_star(dataset_id: str, client: str, supplier: str) -> QueryRespon
     if not result["ok"]:
         return QueryResponse(
             ok=False,
-            error="No existe ruta logística entre ese cliente y ese proveedor (no comparten cadena de productos).",
+            error="No existe ruta logistica entre ese cliente y ese proveedor en la red vial sintetica.",
             algorithm="A* (heurística por distancia)",
             metrics={"logistics_available": True},
         )
@@ -273,6 +274,82 @@ def logistics_a_star(dataset_id: str, client: str, supplier: str) -> QueryRespon
     path = result["path"]
     g_by_node = {step["node"]: step["g_km"] for step in result["visit_order"]}
     lat_goal, lon_goal = coords[goal]
+
+    def enrich_trace(items: list[dict[str, Any]], limit: int | None = None) -> list[dict[str, Any]]:
+        out = []
+        selected = items if limit is None else items[:limit]
+        for item in selected:
+            node = str(item.get("node", ""))
+            lat, lon = coords.get(node, (0.0, 0.0))
+
+            def enrich_node(candidate: dict[str, Any]) -> dict[str, Any]:
+                candidate_node = str(candidate.get("node", ""))
+                candidate_lat, candidate_lon = coords.get(candidate_node, (0.0, 0.0))
+                return {
+                    **candidate,
+                    "label": labels.get(candidate_node, candidate_node),
+                    "lat": round(candidate_lat, 6),
+                    "lon": round(candidate_lon, 6),
+                }
+
+            out.append(
+                {
+                    **item,
+                    "label": labels.get(node, node),
+                    "lat": round(lat, 6),
+                    "lon": round(lon, 6),
+                    "neighbors": [enrich_node(n) for n in item.get("neighbors", [])],
+                    "frontier": [enrich_node(n) for n in item.get("frontier", [])],
+                }
+            )
+        return out
+
+    def map_nodes() -> list[dict[str, Any]]:
+        route_types = {"HUB", "ROUTE"}
+        important = set(path)
+        for item in result["visit_order"][:80]:
+            important.add(str(item.get("node", "")))
+            important.update(str(n.get("node", "")) for n in item.get("frontier", []))
+            important.update(str(n.get("node", "")) for n in item.get("neighbors", []))
+        rows = []
+        for row in nodes.itertuples(index=False):
+            node_id = str(row.node_id)
+            node_type = str(getattr(row, "node_type", "") or "")
+            if node_type not in route_types and node_id not in important:
+                continue
+            rows.append(
+                {
+                    "node": node_id,
+                    "label": labels.get(node_id, node_id),
+                    "type": node_type,
+                    "lat": round(float(getattr(row, "lat", 0) or 0), 6),
+                    "lon": round(float(getattr(row, "lon", 0) or 0), 6),
+                    "zone": str(getattr(row, "zone", "") or ""),
+                }
+            )
+        return rows
+
+    def map_edges() -> list[dict[str, Any]]:
+        path_pairs = {tuple(sorted((path[i - 1], path[i]))) for i in range(1, len(path))}
+        rows = []
+        for row in edges.itertuples(index=False):
+            source = str(row.source)
+            target = str(row.target)
+            edge_type = str(getattr(row, "edge_type", "") or "")
+            include = edge_type != "access" or tuple(sorted((source, target))) in path_pairs
+            if not include:
+                continue
+            rows.append(
+                {
+                    "source": source,
+                    "target": target,
+                    "km": round(float(getattr(row, "km", 0) or 0), 4),
+                    "type": edge_type,
+                    "road": str(getattr(row, "road_name", "") or ""),
+                }
+            )
+        return rows
+
     table = []
     for index, node in enumerate(path):
         lat, lon = coords[node]
@@ -300,57 +377,17 @@ def logistics_a_star(dataset_id: str, client: str, supplier: str) -> QueryRespon
             "stops": len(path),
             "expanded_a_star": result["expanded"],
             "expanded_dijkstra": result["baseline_expanded"],
+            "question_answered": "Ruta de menor distancia entre cliente y proveedor en la red logistica.",
+            "business_use": "Planificar el corredor de entrega/recojo y mostrar cuanta exploracion evita la heuristica de A*.",
             "logistics_available": True,
+            "astar_trace": enrich_trace(result["visit_order"]),
+            "dijkstra_trace": enrich_trace(result["baseline_visit_order"], limit=120),
+            "map_nodes": map_nodes(),
+            "map_edges": map_edges(),
+            "obstacles": logistics_metrics.get("obstacles", []),
+            "logistics_model": logistics_metrics.get("model", "geographic_overlay"),
         },
         evidence={"dataset_id": dataset_id, "artifacts": ["logistics_nodes.csv", "logistics_edges.csv"], "graph": "G_business (overlay logístico)"},
-    )
-
-
-def critical_nodes(dataset_id: str, graph_type: str = "business", limit: int = 20) -> QueryResponse:
-    """Nodos críticos (puntos de articulación de Tarjan): productos/proveedores
-    puente cuya caída fragmenta la red comercial."""
-    gt = graph_type if graph_type in ("business", "sales", "purchases") else "business"
-    edges = read_csv(dataset_id, f"transaction_graph_{gt}_edges.csv")
-    nodes = read_csv(dataset_id, f"transaction_graph_{gt}_nodes.csv")
-    if edges.empty:
-        return QueryResponse(ok=False, error=f"G_{gt} no disponible.", algorithm="Tarjan (puntos de articulación)")
-    labels = {str(r.node_id): str(r.label) for r in nodes.itertuples(index=False)}
-    ntypes = {str(r.node_id): str(r.node_type) for r in nodes.itertuples(index=False)}
-    result = tarjan_critical(edges)
-    articulation = result["articulation"][:limit]
-    table = [
-        {
-            "rank": index + 1,
-            "node": item["node"],
-            "label": labels.get(item["node"], item["node"]),
-            "type": ntypes.get(item["node"], "OTHER"),
-            "fragments_created": item["fragments_created"],
-            "components_after_removal": item["components_after_removal"],
-        }
-        for index, item in enumerate(articulation)
-    ]
-    return QueryResponse(
-        ok=bool(table),
-        answer=(
-            f"Se encontraron {len(result['articulation'])} nodos críticos y {len(result['bridges'])} puentes en G_{gt}. "
-            "Su caída fragmenta la red comercial."
-            if result["articulation"]
-            else f"G_{gt} no tiene puntos de articulación: es 2-conexo (robusto ante la caída de un solo nodo)."
-        ),
-        algorithm=f"Tarjan (DFS low-link) sobre G_{gt}: puntos de articulación y puentes",
-        table=table,
-        metrics={
-            "critical_nodes": len(result["articulation"]),
-            "bridges": len(result["bridges"]),
-            "components_before": result["components_before"],
-            "nodes": result.get("node_count", 0),
-            "shown": len(table),
-        },
-        evidence={
-            "dataset_id": dataset_id,
-            "artifacts": [f"transaction_graph_{gt}_edges.csv", f"transaction_graph_{gt}_nodes.csv"],
-            "graph": f"G_{gt}",
-        },
     )
 
 
@@ -365,11 +402,22 @@ def min_cost_supply(dataset_id: str, items: list[dict]) -> QueryResponse:
         if col in options.columns:
             options[col] = pd.to_numeric(options[col], errors="coerce").fillna(0)
     names = {str(r.product_id): str(getattr(r, "product_name", "")) for r in options.itertuples(index=False)} if "product_name" in options.columns else {}
+
+    def with_name(row: dict) -> dict:
+        return {**row, "product_name": names.get(row.get("product_id", ""), "")}
+
     result = min_cost_flow_supply(options, items)
-    table = [
-        {**row, "product_name": names.get(row["product_id"], "")}
-        for row in result["assignment"]
-    ]
+    table = [with_name(row) for row in result["assignment"]]
+    steps = [with_name(row) for row in result.get("steps", [])]
+    network = result.get("network", {})
+    network = {
+        "source_edges": [with_name(row) for row in network.get("source_edges", [])],
+        "flow_edges": [with_name(row) for row in network.get("flow_edges", [])],
+        "sink_edges": network.get("sink_edges", []),
+    }
+    metrics = {key: value for key, value in result.items() if key not in ("assignment", "steps", "network")}
+    metrics["steps"] = steps
+    metrics["network"] = network
     return QueryResponse(
         ok=result["ok"],
         answer=(
@@ -380,7 +428,7 @@ def min_cost_supply(dataset_id: str, items: list[dict]) -> QueryResponse:
         ),
         algorithm="Min-cost flow (caminos de costo mínimo sucesivos / SPFA): SOURCE→producto→proveedor→SINK",
         table=table,
-        metrics={key: value for key, value in result.items() if key != "assignment"},
+        metrics=metrics,
         evidence={"dataset_id": dataset_id, "artifacts": ["supply_options.csv"], "graph": "flow"},
     )
 
@@ -514,28 +562,77 @@ def optimize_budget(dataset_id: str, budget: float, items: list[dict]) -> QueryR
         options = read_csv(dataset_id, "supply_options.csv")
         for col in ["unit_cost", "capacity_units", "supplier_capacity"]:
             options[col] = pd.to_numeric(options[col], errors="coerce").fillna(0)
-        result = knapsack_supply_budget(options, items, budget)
-        artifacts = ["supply_options.csv"]
+        products = read_csv(dataset_id, "products_clean.csv")
+        result = knapsack_supply_budget(options, items, budget, products)
+        artifacts = ["supply_options.csv", "products_clean.csv"]
     except FileNotFoundError:
         products = read_csv(dataset_id, "products_clean.csv")
         result = knapsack_budget(products, items, budget)
         artifacts = ["products_clean.csv"]
     return QueryResponse(
-        answer=f"Plan calculado con presupuesto {budget}.",
-        algorithm="Programacion dinamica - Knapsack",
+        answer=(
+            f"Con presupuesto S/ {budget:,.2f}, la mejor combinacion usa S/ {result['total_cost']:,.2f} "
+            f"y deja S/ {result['budget_left']:,.2f}. Ganancia esperada maxima: S/ {result['score']:,.2f}."
+        ),
+        algorithm=(
+            "Knapsack 0/1 por programacion dinamica: cada oferta de proveedor es un lote indivisible. "
+            "La celda dp[i][w] guarda la mejor ganancia esperada usando las primeras i ofertas con presupuesto w."
+        ),
         table=result["plan"],
-        metrics={key: value for key, value in result.items() if key != "plan"},
+        metrics={
+            **{key: value for key, value in result.items() if key != "plan"},
+            "question_answered": "Que ofertas de proveedores conviene aceptar para maximizar ganancia esperada sin exceder el presupuesto.",
+            "business_use": "Comparar combinaciones completas: no basta elegir lo mas barato ni la oferta con mayor precio de venta.",
+        },
         evidence={"dataset_id": dataset_id, "artifacts": artifacts},
     )
 
 
 def best_savings(dataset_id: str, limit: int = 20) -> QueryResponse:
     best = read_csv(dataset_id, "bellman_ford_best_paths.csv")
+    edges = read_csv(dataset_id, "bellman_ford_edges.csv")
+    summary = read_json(dataset_id, "bellman_ford_summary.json")
+    table = _records(best.head(limit))
+    trace_edges: list[dict[str, Any]] = []
+    if table and "path" in table[0] and not edges.empty:
+        path = [node for node in str(table[0].get("path", "")).split("|") if node]
+        edge_lookup = {
+            (str(row.source), str(row.target)): row
+            for row in edges.itertuples(index=False)
+        }
+        for index in range(1, len(path)):
+            row = edge_lookup.get((path[index - 1], path[index]))
+            if row is None:
+                continue
+            trace_edges.append(
+                {
+                    "source": path[index - 1],
+                    "target": path[index],
+                    "weight": round(float(getattr(row, "weight", 0) or 0), 4),
+                    "edge_type": str(getattr(row, "edge_type", "") or ""),
+                    "label": str(getattr(row, "label", "") or ""),
+                }
+            )
+    first = table[0] if table else {}
+    decision = "esperar" if first.get("decision") == "esperar" else "comprar hoy"
     return QueryResponse(
-        answer="Mejores ahorros historicos frente al costo mediano por producto.",
-        algorithm="Bellman-Ford",
-        table=_records(best.head(limit)),
-        metrics=read_json(dataset_id, "bellman_ford_summary.json"),
+        answer=(
+            f"Bellman-Ford recomienda {decision}: mejor alternativa {first.get('campaign', '')} "
+            f"para {first.get('product_name', 'producto')} con ahorro estimado S/ {first.get('savings', 0)}."
+            if table
+            else "No hay campañas sinteticas evaluables."
+        ),
+        algorithm=(
+            "Bellman-Ford sobre grafo de campanas sinteticas: costos positivos representan comprar/esperar; "
+            "aristas negativas representan descuentos de campana o cupon. El camino de menor costo indica si conviene comprar hoy o esperar."
+        ),
+        table=table,
+        metrics={
+            **summary,
+            "trace_edges": trace_edges,
+            "question_answered": "Conviene comprar hoy o esperar una campana cercana para reducir el costo?",
+            "business_use": "Evaluar descuentos combinables y costo de espera con pesos negativos, algo que Dijkstra no maneja correctamente.",
+        },
         evidence={"dataset_id": dataset_id, "artifacts": ["bellman_ford_best_paths.csv", "bellman_ford_edges.csv"], "graph": "G_offers"},
     )
 
@@ -671,35 +768,84 @@ def mst_kruskal(dataset_id: str, graph_type: str = "business", limit: int = 60) 
 
     weighted.sort(key=lambda e: e[2])
     uf = UFDS()
-    considered: list[dict[str, Any]] = []
+    considered_all: list[dict[str, Any]] = []
     tree_edges = 0
     rejected = 0
     total_weight = 0.0
-    node_set: set[str] = set()
-    for s, t, w, orig in weighted:
-        node_set.add(s)
-        node_set.add(t)
+    node_set: set[str] = {s for s, _, _, _ in weighted} | {t for _, t, _, _ in weighted}
+    target_tree_edges = max(len(node_set) - 1, 0)
+    mst_completed_at: int | None = None
+    for considered_step, (s, t, w, orig) in enumerate(weighted, start=1):
         accepted = uf.find(s) != uf.find(t)
         if accepted:
             uf.union(s, t)
             tree_edges += 1
             total_weight += w
+            if tree_edges == target_tree_edges and mst_completed_at is None:
+                mst_completed_at = considered_step
         else:
             rejected += 1
-        if len(considered) < limit:
-            considered.append(
-                {
-                    "step": len(considered) + 1,
-                    "source_id": s,
-                    "target_id": t,
-                    "source": labels.get(s, s),
-                    "target": labels.get(t, t),
-                    "weight": round(w, 4),
-                    "raw_weight": round(orig, 4),
-                    "accepted": accepted,
-                }
-            )
+        considered_all.append(
+            {
+                "considered_step": considered_step,
+                "source_id": s,
+                "target_id": t,
+                "source": labels.get(s, s),
+                "target": labels.get(t, t),
+                "weight": round(w, 4),
+                "raw_weight": round(orig, 4),
+                "accepted": accepted,
+            }
+        )
     components = len({uf.find(n) for n in node_set}) if node_set else 0
+
+    if gt == "supplier_projection":
+        accepted_rows = [row for row in considered_all if row["accepted"]]
+        prefix_end = mst_completed_at or len(considered_all)
+        cycle_rows = [
+            row
+            for row in considered_all
+            if int(row["considered_step"]) <= prefix_end and not row["accepted"]
+        ]
+        cycle_budget = min(len(cycle_rows), max(4, min(12, limit // 3))) if cycle_rows else 0
+        accepted_budget = max(0, min(len(accepted_rows), limit - cycle_budget))
+        picked_accepted = accepted_rows[:accepted_budget]
+
+        visible_uf = UFDS()
+        for row in picked_accepted:
+            visible_uf.union(str(row["source_id"]), str(row["target_id"]))
+
+        picked_cycles: list[dict[str, Any]] = []
+        used_cycle_steps: set[int] = set()
+        for row in cycle_rows:
+            if len(picked_cycles) >= cycle_budget:
+                break
+            source_id = str(row["source_id"])
+            target_id = str(row["target_id"])
+            if visible_uf.find(source_id) == visible_uf.find(target_id):
+                picked_cycles.append(row)
+                used_cycle_steps.add(int(row["considered_step"]))
+
+        if len(picked_cycles) < cycle_budget:
+            for row in cycle_rows:
+                step_no = int(row["considered_step"])
+                if step_no in used_cycle_steps:
+                    continue
+                picked_cycles.append(row)
+                used_cycle_steps.add(step_no)
+                if len(picked_cycles) >= cycle_budget:
+                    break
+
+        considered = sorted(
+            picked_accepted + picked_cycles,
+            key=lambda row: int(row["considered_step"]),
+        )[:limit]
+    else:
+        considered = considered_all[:limit]
+
+    for idx, row in enumerate(considered, start=1):
+        row["step"] = idx
+
     return QueryResponse(
         ok=tree_edges > 0,
         answer=(
@@ -710,11 +856,13 @@ def mst_kruskal(dataset_id: str, graph_type: str = "business", limit: int = 60) 
         table=considered,
         metrics={
             "nodes": len(node_set),
+            "candidate_edges": len(weighted),
             "tree_edges": tree_edges,
             "rejected_by_cycle": rejected,
             "total_weight": round(total_weight, 2),
             "components": components,
             "considered_shown": len(considered),
+            "considered_to_complete_mst": mst_completed_at or len(considered_all),
             "weight": weight_desc,
         },
         evidence={"dataset_id": dataset_id, "artifacts": artifacts, "graph": graph_label},

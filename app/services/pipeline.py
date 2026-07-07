@@ -14,7 +14,7 @@ from app.config import (
     MIN_SUPPLIER_UFDS_SIMILARITY,
     MIN_TRANSACTION_ROWS,
 )
-from app.core.algorithms import bellman_ford_savings, build_supply_options, families_from_projection
+from app.core.algorithms import bellman_ford_campaigns, build_supply_options, families_from_projection
 from app.core.attributes import extract_product_attributes
 from app.core.attribute_llm import gemini_available, refine_rules_with_gemini
 from app.core.graphs import (
@@ -212,7 +212,7 @@ def _build_dataset(dataset_id: str, raw: dict[str, pd.DataFrame]) -> DatasetSumm
     if not options.empty:
         write_csv(dataset_id, "supply_options.csv", options)
         generated.append(ArtifactStatus(name="supply_options.csv", kind="optimization"))
-        offers = bellman_ford_savings(options)
+        offers = bellman_ford_campaigns(options, cleaned["products"])
         write_csv(dataset_id, "bellman_ford_candidates.csv", offers["candidates"])
         write_csv(dataset_id, "bellman_ford_edges.csv", offers["edges"])
         write_csv(dataset_id, "bellman_ford_best_paths.csv", offers["best_paths"])
@@ -298,7 +298,6 @@ def _company_rules() -> dict:
             "A* logistico",
             "Bellman-Ford",
             "Kruskal + UFDS",
-            "Tarjan (nodos criticos)",
             "Programacion dinamica (Knapsack)",
             "Min-cost flow",
         ],

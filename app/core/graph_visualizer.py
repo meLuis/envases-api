@@ -76,6 +76,33 @@ def _to_float(value: Any, fallback: float = 0.0) -> float:
         return fallback
 
 
+# El PNG del "mapa" es solo una vista general. En grafos grandes (miles de nodos)
+# dibujar todo produce una maraña ilegible y un archivo pesado, y el spring_layout
+# se vuelve lentísimo. Para la imagen se toma una MUESTRA de los nodos de mayor
+# grado (los hubs de la red); el grafo COMPLETO se conserva para los algoritmos.
+DISPLAY_NODE_CAP = 200
+
+
+def _cap_for_display(graph, max_nodes: int = DISPLAY_NODE_CAP):
+    """Devuelve (subgrafo_para_dibujar, nodos_totales, aristas_totales).
+
+    Si el grafo cabe bajo el tope, se devuelve intacto. Si no, se induce el
+    subgrafo con los `max_nodes` nodos de mayor grado.
+    """
+    orig_nodes = graph.number_of_nodes()
+    orig_edges = graph.number_of_edges()
+    if orig_nodes <= max_nodes:
+        return graph, orig_nodes, orig_edges
+    top = sorted(graph.nodes, key=lambda node: graph.degree(node), reverse=True)[:max_nodes]
+    return graph.subgraph(top).copy(), orig_nodes, orig_edges
+
+
+def _map_title(title: str, shown: int, orig_nodes: int, orig_edges: int) -> str:
+    if shown < orig_nodes:
+        return f"{title} - mapa (muestra de {shown} de {orig_nodes} nodos · {orig_edges} aristas)"
+    return f"{title} - grafo completo ({orig_nodes} nodos, {orig_edges} aristas)"
+
+
 def load_graph_tables(stage2_output_dir: str | Path) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     base = Path(stage2_output_dir)
     nodes = _safe_read_csv(base / "semantic_attribute_graph_nodes.csv")
@@ -271,6 +298,8 @@ def draw_transaction_full_graph(graph, output_path, title: str, mpatches, plt, n
     fig.patch.set_facecolor("#0b1020")
     ax.set_facecolor("#0b1020")
 
+    graph, orig_n, orig_e = _cap_for_display(graph)
+
     # Layout circular: anillos concÃ©ntricos por tipo (entidades dentro, el grupo
     # mÃ¡s numeroso en el aro exterior).
     pos = concentric_layout(
@@ -311,7 +340,7 @@ def draw_transaction_full_graph(graph, output_path, title: str, mpatches, plt, n
 
     ax.set_aspect("equal")
     ax.set_title(
-        f"{title} - grafo completo ({graph.number_of_nodes()} nodos, {graph.number_of_edges()} aristas)",
+        _map_title(title, graph.number_of_nodes(), orig_n, orig_e),
         color="#f8fafc", fontsize=16, fontweight="bold", loc="left", pad=18,
     )
     legend = [
@@ -335,6 +364,8 @@ def _draw_generic_static_graph(graph, output_path, title: str, mpatches, plt, nx
     fig, ax = plt.subplots(figsize=(24, 16), dpi=170)
     fig.patch.set_facecolor("#0b1020")
     ax.set_facecolor("#0b1020")
+
+    graph, orig_n, orig_e = _cap_for_display(graph)
 
     if graph.number_of_nodes() == 0:
         ax.set_title(f"{title} - sin nodos", color="#f8fafc", fontsize=16, fontweight="bold", loc="left")
@@ -375,7 +406,7 @@ def _draw_generic_static_graph(graph, output_path, title: str, mpatches, plt, nx
         )
 
         ax.set_title(
-            f"{title} - grafo completo ({graph.number_of_nodes()} nodos, {graph.number_of_edges()} aristas)",
+            _map_title(title, graph.number_of_nodes(), orig_n, orig_e),
             color="#f8fafc", fontsize=16, fontweight="bold", loc="left", pad=18,
         )
         legend = [
@@ -417,15 +448,26 @@ def build_supplier_projection_graph(edges: pd.DataFrame, nx) -> Any:
 
 def build_offers_graph(edges: pd.DataFrame, nx) -> Any:
     graph = nx.DiGraph()
+
+    def offer_node_type(node: str) -> str:
+        if node == "SOURCE":
+            return "OTHER"
+        if node.startswith("OFFER:"):
+            return "PRODUCT"
+        if node.startswith("CAMPAIGN:") or node.startswith("COUPON:"):
+            return "ATTRIBUTE"
+        if node.startswith("FINAL:"):
+            return "SUPPLIER"
+        return "OTHER"
+
     for row in edges.itertuples(index=False):
         source = str(row.source)
         target = str(row.target)
         weight = _to_float(getattr(row, "weight", 0), 0.0)
         supplier = str(getattr(row, "supplier", "") or "")
-        source_type = "OTHER" if source == "SOURCE" else "PRODUCT"
-        target_type = "SUPPLIER" if target.startswith("OPTION:") else "PRODUCT"
-        graph.add_node(source, label=source.replace("PRODUCT:", ""), node_type=source_type)
-        graph.add_node(target, label=supplier or target.replace("OPTION:", ""), node_type=target_type)
+        label = str(getattr(row, "label", "") or "")
+        graph.add_node(source, label=source.replace("PRODUCT:", ""), node_type=offer_node_type(source))
+        graph.add_node(target, label=label or supplier or target.replace("OPTION:", ""), node_type=offer_node_type(target))
         graph.add_edge(
             source,
             target,
@@ -541,7 +583,7 @@ def render_graph_visualizations(stage2_output_dir: str | Path, output_dir: str |
         paths["g_offers_full.png"] = _draw_generic_static_graph(
             offers_graph,
             output / "g_offers_full.png",
-            "G_offers - ahorros Bellman-Ford",
+            "G_offers - campanas, cupones y pesos negativos",
             mpatches,
             plt,
             nx,

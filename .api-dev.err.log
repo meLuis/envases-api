@@ -1,0 +1,27 @@
+INFO:     Will watch for changes in these directories: ['C:\\Users\\Luis\\Desktop\\TF-Final\\envases-api']
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [44848] using WatchFiles
+INFO:     Started server process [37204]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'app\core\algorithms.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [37204]
+WARNING:  WatchFiles detected changes in 'app\core\algorithms.py'. Reloading...
+INFO:     Started server process [30068]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [30068]
+INFO:     Started server process [29796]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'app\core\algorithms.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [29796]

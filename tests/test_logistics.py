@@ -136,10 +136,6 @@ def test_synthetic_pipeline_generates_logistics_and_runs_all(tmp_path: Path) -> 
     assert len(a_star.table) >= 2
     assert a_star.metrics["total_km"] > 0
 
-    # Tarjan crítico sobre G_business.
-    critical = queries.critical_nodes(dataset_id, "business", 20)
-    assert "critical_nodes" in critical.metrics
-
     # Min-cost flow: demanda de un producto que varios proveedores cubren.
     mcf = queries.min_cost_supply(dataset_id, [{"product_id": "1002", "quantity": 60}])
     assert mcf.ok

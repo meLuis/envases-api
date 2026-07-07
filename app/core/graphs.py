@@ -370,60 +370,163 @@ def build_logistics_overlay(
             labels[str(row.node_id)] = str(getattr(row, "label", "") or "")
             types[str(row.node_id)] = str(getattr(row, "node_type", "") or "")
 
-    # producto -> entidades (con coordenadas) que lo transan.
-    product_entities: dict[str, set[str]] = defaultdict(set)
-    for row in business_edges.itertuples(index=False):
-        source = str(row.source)
-        target = str(row.target)
-        entity = source if source in coords else (target if target in coords else None)
-        product = target if target.startswith("PRODUCT:") else (source if source.startswith("PRODUCT:") else None)
-        if entity is None or product is None:
-            continue
-        product_entities[product].add(entity)
+    route_nodes: dict[str, dict[str, Any]] = {
+        "HUB:PUCALLPA": {"label": "Hub Pucallpa", "lat": -8.379, "lon": -74.553, "node_type": "HUB", "zone": "selva"},
+        "RUTA:BOQUERON": {"label": "Boqueron del Padre Abad", "lat": -9.048, "lon": -75.505, "node_type": "ROUTE", "zone": "selva"},
+        "RUTA:TINGO_MARIA": {"label": "Tingo Maria", "lat": -9.295, "lon": -76.010, "node_type": "ROUTE", "zone": "selva"},
+        "RUTA:HUANUCO": {"label": "Huanuco", "lat": -9.930, "lon": -76.240, "node_type": "ROUTE", "zone": "sierra"},
+        "RUTA:CERRO_PASCO": {"label": "Cerro de Pasco", "lat": -10.683, "lon": -76.256, "node_type": "ROUTE", "zone": "sierra"},
+        "RUTA:LA_OROYA": {"label": "La Oroya", "lat": -11.521, "lon": -75.900, "node_type": "ROUTE", "zone": "sierra"},
+        "HUB:ATE": {"label": "Hub Ate / Carretera Central", "lat": -12.030, "lon": -76.920, "node_type": "HUB", "zone": "lima"},
+        "HUB:CENTRO": {"label": "Centro de distribucion Lima", "lat": -12.046, "lon": -77.043, "node_type": "HUB", "zone": "lima"},
+        "HUB:CALLAO": {"label": "Puerto Callao", "lat": -12.056, "lon": -77.118, "node_type": "HUB", "zone": "lima"},
+        "HUB:MIRAFLORES": {"label": "Hub Miraflores", "lat": -12.121, "lon": -77.030, "node_type": "HUB", "zone": "lima"},
+        "HUB:SUR": {"label": "Hub Sur", "lat": -12.150, "lon": -76.990, "node_type": "HUB", "zone": "lima"},
+        "HUB:NORTE": {"label": "Hub Norte", "lat": -11.980, "lon": -77.070, "node_type": "HUB", "zone": "lima"},
+        "HUB:SJL": {"label": "Hub SJL", "lat": -11.980, "lon": -76.990, "node_type": "HUB", "zone": "lima"},
+    }
 
-    # Arista entidad-entidad si comparten producto; peso = distancia recta (km).
-    seen: dict[tuple[str, str], float] = {}
-    for entities in product_entities.values():
-        members = sorted(entities)
-        for i in range(len(members)):
-            for j in range(i + 1, len(members)):
-                a, b = members[i], members[j]
-                key = (a, b)
-                if key in seen:
-                    continue
-                (lat_a, lon_a), (lat_b, lon_b) = coords[a], coords[b]
-                seen[key] = round(haversine_km(lat_a, lon_a, lat_b, lon_b), 4)
+    for i in range(1, 37):
+        ring = 1 + (i % 6)
+        spoke = i % 12
+        # Ramales hacia el este/noreste: son cortos desde Pucallpa, pero no
+        # acercan a Lima. Dijkstra los visita por bajo g(n); A* los evita por h(n).
+        lat = -7.95 + 0.055 * ring + 0.018 * (spoke % 4)
+        lon = -73.75 + 0.085 * ring + 0.022 * (spoke // 4)
+        route_nodes[f"RUTA:SELVA_RAMAL_{i:02d}"] = {
+            "label": f"Ramal logistico selva {i:02d}",
+            "lat": round(lat, 6),
+            "lon": round(lon, 6),
+            "node_type": "ROUTE",
+            "zone": "desvio",
+        }
 
-    used_nodes = {node for pair in seen for node in pair}
+    hub_ids = [node_id for node_id, data in route_nodes.items() if data["node_type"] == "HUB"]
+    lima_hubs = [node_id for node_id in hub_ids if route_nodes[node_id]["zone"] == "lima"]
+
+    def node_coord(node_id: str) -> tuple[float, float]:
+        if node_id in route_nodes:
+            data = route_nodes[node_id]
+            return float(data["lat"]), float(data["lon"])
+        return coords[node_id]
+
+    edge_rows: list[dict[str, Any]] = []
+    edge_keys: set[tuple[str, str]] = set()
+
+    def add_edge(source: str, target: str, factor: float = 1.25, road_name: str = "Ruta local", edge_type: str = "road", km: float | None = None) -> None:
+        if source == target:
+            return
+        key = tuple(sorted((source, target)))
+        if key in edge_keys:
+            return
+        edge_keys.add(key)
+        lat_a, lon_a = node_coord(source)
+        lat_b, lon_b = node_coord(target)
+        straight = haversine_km(lat_a, lon_a, lat_b, lon_b)
+        distance = km if km is not None else straight * factor
+        edge_rows.append(
+            {
+                "source": source,
+                "target": target,
+                "source_name": labels.get(source, route_nodes.get(source, {}).get("label", source)),
+                "target_name": labels.get(target, route_nodes.get(target, {}).get("label", target)),
+                "km": round(max(distance, straight), 4),
+                "edge_type": edge_type,
+                "road_name": road_name,
+            }
+        )
+
+    def nearest_hub(entity: str) -> str:
+        lat, _ = coords[entity]
+        candidates = ["HUB:PUCALLPA"] if lat > -10.0 else lima_hubs
+        return min(
+            candidates,
+            key=lambda hub: haversine_km(coords[entity][0], coords[entity][1], route_nodes[hub]["lat"], route_nodes[hub]["lon"]),
+        )
+
+    add_edge("HUB:PUCALLPA", "RUTA:BOQUERON", factor=1.02, road_name="Federico Basadre", edge_type="highway")
+    add_edge("RUTA:BOQUERON", "RUTA:TINGO_MARIA", factor=1.08, road_name="Federico Basadre", edge_type="highway")
+    add_edge("RUTA:TINGO_MARIA", "RUTA:HUANUCO", factor=1.10, road_name="Carretera Central", edge_type="highway")
+    add_edge("RUTA:HUANUCO", "RUTA:CERRO_PASCO", factor=1.12, road_name="Carretera Central", edge_type="mountain")
+    add_edge("RUTA:CERRO_PASCO", "RUTA:LA_OROYA", factor=1.14, road_name="Carretera Central", edge_type="mountain")
+    add_edge("RUTA:LA_OROYA", "HUB:ATE", factor=1.18, road_name="Carretera Central", edge_type="mountain")
+    add_edge("HUB:ATE", "HUB:CENTRO", factor=1.35, road_name="Via Evitamiento", edge_type="urban")
+    add_edge("HUB:CENTRO", "HUB:CALLAO", factor=1.35, road_name="Av. Argentina", edge_type="urban")
+    add_edge("HUB:CENTRO", "HUB:MIRAFLORES", factor=1.30, road_name="Via Expresa", edge_type="urban")
+    add_edge("HUB:CENTRO", "HUB:NORTE", factor=1.35, road_name="Panamericana Norte", edge_type="urban")
+    add_edge("HUB:ATE", "HUB:SJL", factor=1.30, road_name="Anillo Este", edge_type="urban")
+    add_edge("HUB:ATE", "HUB:SUR", factor=1.35, road_name="Panamericana Sur", edge_type="urban")
+    add_edge("HUB:SUR", "HUB:MIRAFLORES", factor=1.25, road_name="Circuito Sur", edge_type="urban")
+    add_edge("HUB:NORTE", "HUB:CALLAO", factor=1.25, road_name="Nestor Gambetta", edge_type="urban")
+
+    previous = "HUB:PUCALLPA"
+    for i in range(1, 37):
+        node = f"RUTA:SELVA_RAMAL_{i:02d}"
+        add_edge("HUB:PUCALLPA", node, factor=1.2, road_name="Ramal sin salida", edge_type="detour")
+        if i % 3 == 0:
+            add_edge(previous, node, factor=1.15, road_name="Trocha secundaria", edge_type="detour")
+            previous = node
+
+    entity_nodes = [node for node in coords if types.get(node) in {"CLIENT", "SUPPLIER"}]
+    for node in entity_nodes:
+        hub = nearest_hub(node)
+        straight = haversine_km(coords[node][0], coords[node][1], route_nodes[hub]["lat"], route_nodes[hub]["lon"])
+        if hub == "HUB:PUCALLPA":
+            access_min = 5.0
+        elif types.get(node) == "CLIENT":
+            access_min = 100.0
+        else:
+            access_min = 60.0
+        add_edge(
+            node,
+            hub,
+            road_name="Acceso urbano" if hub != "HUB:PUCALLPA" else "Acceso Ucayali",
+            edge_type="access",
+            km=max(straight * 1.25, access_min),
+        )
+
+    used_nodes = {node for edge in edge_rows for node in (edge["source"], edge["target"])}
     nodes = pd.DataFrame(
         [
             {
                 "node_id": node,
-                "node_type": types.get(node, "ENTITY"),
-                "label": labels.get(node, node),
-                "lat": coords[node][0],
-                "lon": coords[node][1],
+                "node_type": route_nodes[node]["node_type"] if node in route_nodes else types.get(node, "ENTITY"),
+                "label": route_nodes[node]["label"] if node in route_nodes else labels.get(node, node),
+                "lat": node_coord(node)[0],
+                "lon": node_coord(node)[1],
+                "zone": route_nodes.get(node, {}).get("zone", ""),
             }
             for node in sorted(used_nodes)
         ]
     )
-    edges = pd.DataFrame(
-        [
-            {
-                "source": a,
-                "target": b,
-                "source_name": labels.get(a, a),
-                "target_name": labels.get(b, b),
-                "km": km,
-            }
-            for (a, b), km in sorted(seen.items(), key=lambda kv: kv[1])
-        ]
-    )
+    edges = pd.DataFrame(edge_rows).sort_values(["edge_type", "km", "source", "target"]).reset_index(drop=True)
     metrics = {
         "graph_name": "logistics_overlay",
         "available": bool(len(edges)),
         "node_count": int(len(nodes)),
         "edge_count": int(len(edges)),
+        "model": "synthetic_road_network",
+        "obstacles": [
+            {
+                "label": "Cordillera / zona sin paso directo",
+                "points": [
+                    {"lat": -10.2, "lon": -76.95},
+                    {"lat": -11.7, "lon": -76.55},
+                    {"lat": -12.25, "lon": -76.15},
+                    {"lat": -11.2, "lon": -75.35},
+                    {"lat": -10.0, "lon": -75.65},
+                ],
+            },
+            {
+                "label": "Selva y rios: ramales locales",
+                "points": [
+                    {"lat": -8.1, "lon": -74.9},
+                    {"lat": -8.85, "lon": -74.2},
+                    {"lat": -9.25, "lon": -74.9},
+                    {"lat": -8.65, "lon": -75.25},
+                ],
+            },
+        ],
     }
     return nodes, edges, metrics
 
@@ -438,12 +541,16 @@ def a_star_route(
     """A* sobre la capa logística: g(n) = km reales acumulados, h(n) = distancia
     recta al destino (admisible ⇒ ruta óptima). Devuelve la ruta, el costo total
     y, para la didáctica, cuántos nodos expandió frente a Dijkstra (h=0)."""
-    adjacency: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    adjacency: dict[str, list[tuple[str, float, dict[str, Any]]]] = defaultdict(list)
     for row in edges.itertuples(index=False):
         s, t = str(row.source), str(row.target)
         w = float(getattr(row, weight_col, 0) or 0)
-        adjacency[s].append((t, w))
-        adjacency[t].append((s, w))
+        meta = {
+            "edge_type": str(getattr(row, "edge_type", "") or ""),
+            "road_name": str(getattr(row, "road_name", "") or ""),
+        }
+        adjacency[s].append((t, w, meta))
+        adjacency[t].append((s, w, meta))
 
     if start not in coords or goal not in coords or start not in adjacency:
         return {"ok": False, "reason": "endpoint_missing", "path": [], "total_km": 0.0}
@@ -463,22 +570,42 @@ def a_star_route(
         expanded = 0
         order: list[dict[str, Any]] = []
         closed: set[str] = set()
+
+        def frontier_snapshot(limit: int = 8) -> list[dict[str, Any]]:
+            candidates = []
+            for candidate, candidate_g in g_score.items():
+                if candidate in closed:
+                    continue
+                candidate_h = heuristic(candidate) if use_heuristic else 0.0
+                candidates.append(
+                    {
+                        "node": candidate,
+                        "g_km": round(candidate_g, 4),
+                        "h_km": round(candidate_h, 4),
+                        "f_km": round(candidate_g + candidate_h, 4),
+                    }
+                )
+            candidates.sort(key=lambda item: (item["f_km"], item["h_km"], item["node"]))
+            return candidates[:limit]
+
         while heap:
             f, g, node = heapq.heappop(heap)
             if node in closed:
                 continue
             closed.add(node)
             expanded += 1
-            order.append(
-                {
-                    "step": expanded,
-                    "node": node,
-                    "g_km": round(g, 4),
-                    "h_km": round(heuristic(node), 4) if use_heuristic else 0.0,
-                    "f_km": round(f, 4),
-                }
-            )
+            expanded_item = {
+                "step": expanded,
+                "node": node,
+                "g_km": round(g, 4),
+                "h_km": round(heuristic(node), 4) if use_heuristic else 0.0,
+                "f_km": round(f, 4),
+                "neighbors": [],
+                "frontier": [],
+            }
             if node == goal:
+                expanded_item["frontier"] = frontier_snapshot()
+                order.append(expanded_item)
                 path: list[str] = []
                 cur: str | None = node
                 while cur is not None:
@@ -486,17 +613,38 @@ def a_star_route(
                     cur = prev.get(cur)
                 path.reverse()
                 return path, round(g, 4), expanded, order
-            for neighbor, w in adjacency.get(node, []):
+            for neighbor, w, meta in adjacency.get(node, []):
+                if neighbor in closed:
+                    continue
                 tentative = g + w
+                neighbor_h = heuristic(neighbor) if use_heuristic else 0.0
+                neighbor_f = tentative + neighbor_h
+                improved = tentative < g_score.get(neighbor, float("inf"))
+                expanded_item["neighbors"].append(
+                    {
+                        "node": neighbor,
+                        "edge_km": round(w, 4),
+                        "g_km": round(tentative, 4),
+                        "h_km": round(neighbor_h, 4),
+                        "f_km": round(neighbor_f, 4),
+                        "improved": improved,
+                        "edge_type": meta.get("edge_type", ""),
+                        "road_name": meta.get("road_name", ""),
+                    }
+                )
                 if tentative < g_score.get(neighbor, float("inf")):
                     g_score[neighbor] = tentative
                     prev[neighbor] = node
-                    priority = tentative + (heuristic(neighbor) if use_heuristic else 0.0)
+                    priority = neighbor_f
                     heapq.heappush(heap, (priority, tentative, neighbor))
+            expanded_item["neighbors"].sort(key=lambda item: (item["f_km"], item["h_km"], item["node"]))
+            expanded_item["neighbors"] = expanded_item["neighbors"][:8]
+            expanded_item["frontier"] = frontier_snapshot()
+            order.append(expanded_item)
         return [], 0.0, expanded, order
 
     path, total_km, expanded, order = search(use_heuristic=True)
-    _, _, baseline_expanded, _ = search(use_heuristic=False)
+    _, _, baseline_expanded, baseline_order = search(use_heuristic=False)
     return {
         "ok": bool(path),
         "reason": "ok" if path else "no_path",
@@ -505,113 +653,8 @@ def a_star_route(
         "expanded": expanded,
         "baseline_expanded": baseline_expanded,
         "visit_order": order,
+        "baseline_visit_order": baseline_order,
     }
-
-
-# ============================================================================
-# TARJAN — puntos de articulación y puentes (nodos/aristas críticos)
-# ============================================================================
-
-
-def tarjan_critical(edges: pd.DataFrame) -> dict[str, Any]:
-    """Puntos de articulación y puentes con DFS de Tarjan (low-link) sobre el
-    grafo NO dirigido. Un punto de articulación es un nodo cuya caída fragmenta
-    la red; un puente, una arista con el mismo efecto. Devuelve, por nodo
-    crítico, cuántas componentes deja al removerlo (impacto)."""
-    adjacency = _adjacency(edges)
-    nodes = list(adjacency.keys())
-    if not nodes:
-        return {"articulation": [], "bridges": [], "components_before": 0}
-
-    disc: dict[str, int] = {}
-    low: dict[str, int] = {}
-    timer = 0
-    articulation: set[str] = set()
-    bridges: list[tuple[str, str]] = []
-
-    # DFS iterativo (grafos comerciales pueden ser grandes: evita recursión).
-    for root in nodes:
-        if root in disc:
-            continue
-        root_children = 0
-        stack: list[tuple[str, str | None, iter]] = [(root, None, iter(adjacency[root]))]
-        disc[root] = low[root] = timer
-        timer += 1
-        while stack:
-            node, parent, neighbors = stack[-1]
-            advanced = False
-            for neighbor in neighbors:
-                if neighbor == parent:
-                    continue
-                if neighbor not in disc:
-                    disc[neighbor] = low[neighbor] = timer
-                    timer += 1
-                    if node == root:
-                        root_children += 1
-                    stack.append((neighbor, node, iter(adjacency[neighbor])))
-                    advanced = True
-                    break
-                low[node] = min(low[node], disc[neighbor])
-            if not advanced:
-                stack.pop()
-                if stack:
-                    parent_node = stack[-1][0]
-                    low[parent_node] = min(low[parent_node], low[node])
-                    if parent_node != root and low[node] >= disc[parent_node]:
-                        articulation.add(parent_node)
-                    if low[node] > disc[parent_node]:
-                        bridges.append((parent_node, node))
-        if root_children > 1:
-            articulation.add(root)
-
-    components_before = _count_components(adjacency)
-    impact = []
-    for node in articulation:
-        after = _count_components_without(adjacency, node)
-        impact.append({"node": node, "components_after_removal": after, "fragments_created": after - components_before})
-    impact.sort(key=lambda item: (item["fragments_created"], item["components_after_removal"]), reverse=True)
-    return {
-        "articulation": impact,
-        "bridges": [{"source": a, "target": b, "km": None} for a, b in bridges],
-        "components_before": components_before,
-        "node_count": len(nodes),
-    }
-
-
-def _count_components(adjacency: dict[str, set[str]]) -> int:
-    seen: set[str] = set()
-    count = 0
-    for node in adjacency:
-        if node in seen:
-            continue
-        count += 1
-        queue = deque([node])
-        seen.add(node)
-        while queue:
-            current = queue.popleft()
-            for neighbor in adjacency[current]:
-                if neighbor not in seen:
-                    seen.add(neighbor)
-                    queue.append(neighbor)
-    return count
-
-
-def _count_components_without(adjacency: dict[str, set[str]], removed: str) -> int:
-    seen: set[str] = {removed}
-    count = 0
-    for node in adjacency:
-        if node in seen:
-            continue
-        count += 1
-        queue = deque([node])
-        seen.add(node)
-        while queue:
-            current = queue.popleft()
-            for neighbor in adjacency[current]:
-                if neighbor != removed and neighbor not in seen:
-                    seen.add(neighbor)
-                    queue.append(neighbor)
-    return count
 
 
 def _transaction_graph(frame: pd.DataFrame, entity_type: str, graph_name: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:

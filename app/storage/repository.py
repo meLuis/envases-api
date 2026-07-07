@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -55,11 +56,23 @@ def read_json(dataset_id: str, name: str) -> dict:
 def list_all_datasets() -> list[dict]:
     if not STORAGE_DIR.exists():
         return []
-    return [
-        {"dataset_id": d.name, "size_bytes": sum(f.stat().st_size for f in d.rglob("*") if f.is_file())}
-        for d in sorted(STORAGE_DIR.iterdir())
-        if d.is_dir()
-    ]
+    datasets: list[dict] = []
+    for d in STORAGE_DIR.iterdir():
+        if not d.is_dir():
+            continue
+        files = [f for f in d.rglob("*") if f.is_file()]
+        summary = d / "dataset_summary.json"
+        loaded_ts = summary.stat().st_mtime if summary.exists() else d.stat().st_ctime
+        updated_ts = max((f.stat().st_mtime for f in files), default=loaded_ts)
+        datasets.append(
+            {
+                "dataset_id": d.name,
+                "size_bytes": sum(f.stat().st_size for f in files),
+                "loaded_at": datetime.fromtimestamp(loaded_ts, tz=timezone.utc).isoformat(),
+                "updated_at": datetime.fromtimestamp(updated_ts, tz=timezone.utc).isoformat(),
+            }
+        )
+    return sorted(datasets, key=lambda item: item["loaded_at"], reverse=True)
 
 
 def delete_dataset(dataset_id: str) -> None:
